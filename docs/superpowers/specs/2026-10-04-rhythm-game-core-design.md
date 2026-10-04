@@ -120,8 +120,16 @@ note 畫在判定圈上只是視覺呈現；判定只檢查游標的角度落在
 | exe（`b.addExecutable`） | `src/main.zig` | 是 | 視窗、繪圖、場景、輪詢 |
 
 因此純核心放進 `rhythm_game` 模組即可：**任何人在 `chart.zig` / `clock.zig` /
-`judge.zig` / `scoring.zig` / `geom.zig` 裡寫 `@import("raylib")` 會直接編譯失敗。**
+`judge.zig` / `scoring.zig` / `geom.zig` 裡實際使用 raylib 會直接編譯失敗**，
+訊息是 `error: no module named 'raylib' available within module 'root'`。
 界線是編譯器保證的，不是約定。副作用是純模組的測試不需連結 raylib，跑得很快。
+
+一個實測過的注意事項：**Zig 不分析沒被引用的宣告**，所以單獨一行
+`const rl = @import("raylib");` 擺在純核心裡不會報錯——那個 import 從未被解析。
+錯誤要等到 raylib 真的被用到（而且用它的那段程式碼本身會被分析，例如在
+`test` 區塊或被引用的函式裡）才會出現。這不影響界線的效力：會編譯失敗的正是
+「真的用了 raylib」這個我們要擋的情況。但它意味著想驗證這條界線還在時，
+必須寫一段真的會用到 raylib 的程式碼，不能只加一行 import。
 
 ### 檔案佈局
 

@@ -54,8 +54,13 @@ zig build -Doptimize=ReleaseFast
 | `rhythm_game` | `src/root.zig` | 否 | `constants` `geom` `chart` `clock` `judge` `scoring` |
 | exe | `src/main.zig` | 是 | `input` `render` `recorder` `scene/` |
 
-在純核心那一側寫 `@import("raylib")` 會直接編譯失敗。不要為了繞過它而把純邏輯
-搬到 exe 側——那是在拆掉唯一能自動守住這條界線的機制。
+在純核心那一側**實際使用** raylib 會直接編譯失敗：
+`error: no module named 'raylib' available within module 'root'`。
+不要為了繞過它而把純邏輯搬到 exe 側——那是在拆掉唯一能自動守住這條界線的機制。
+
+注意 Zig 不分析沒被引用的宣告，所以單獨一行 `const rl = @import("raylib");`
+不會報錯。要驗證界線還在，得寫一段真的會用到 raylib 且本身會被分析的程式碼
+（例如放在 `test` 區塊裡）。
 
 純幾何（`zoneAt`、Cell ↔ 角度、環狀 arc）住在 `geom.zig`；`input.zig` 只做
 「讀 raylib 的滑鼠與鍵盤狀態，轉成 `geom` / `judge` 的純型別」這一層。

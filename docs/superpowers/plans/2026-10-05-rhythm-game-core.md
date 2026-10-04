@@ -201,12 +201,27 @@ Expected: PASS
 
 - [ ] **Step 6: 確認純核心真的沒連結 raylib**
 
-暫時在 `src/constants.zig` 最上面加一行 `const rl = @import("raylib");`，然後：
+**重要：Zig 不分析沒被引用的宣告**，所以光是加一行 `const rl = @import("raylib");`
+**不會**報錯——那個 import 從頭到尾沒被解析。要讓界線現形，必須在一個**會被分析**
+的地方（例如 `test` 區塊）真的用到它。
+
+暫時在 `src/constants.zig` 的第一行（`//!` 之後）插入：
+
+```zig
+test "boundary probe" {
+    const rl = @import("raylib");
+    _ = rl.KeyboardKey.z;
+}
+```
 
 Run: `zig build test`
-Expected: FAIL — `error: no module named 'raylib' available within module rhythm_game`
+Expected: FAIL — `error: no module named 'raylib' available within module 'root'`
+（訊息裡的模組名是 `'root'`，不是 `rhythm_game`——那是 Zig 對測試目標 root 模組的稱呼。）
 
-確認過後把那一行刪掉，再跑一次 `zig build test` 確認回到 PASS。這一步是在驗證 Global Constraints 裡那條界線真的有效。
+同時建議順手確認探測本身有效：把 `"raylib"` 換成 `"totally_not_a_module"`，
+應該得到同一形狀的錯誤。兩者都報錯才證明界線是真的，而不是你的探測沒生效。
+
+確認過後把整個 test 區塊刪掉，再跑一次 `zig build test` 確認回到 PASS。
 
 - [ ] **Step 7: Commit**
 
