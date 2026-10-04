@@ -1359,7 +1359,10 @@ Create `charts/01-metronome/song.json`：
         { "t": 7000, "type": "slider", "cell": 48, "width": 4, "sweep": -24,
           "dur": 1500, "combo": 6 },
         { "t": 9000, "type": "center" },
-        { "t": 9500, "type": "tap", "cell": 0, "width": 4 }
+        { "t": 9500, "type": "tap", "cell": 0, "width": 4 },
+        { "t": 10000, "type": "tap", "cell": 62, "width": 4 },
+        { "t": 10500, "type": "slider", "cell": 60, "width": 4, "sweep": 8,
+          "dur": 1000, "combo": 4 }
       ]
     }
   ]
@@ -1371,16 +1374,24 @@ Create `charts/01-metronome/song.json`：
 - 第一條 slider 順時針掃 16 格（4 個 combo）
 - 第二條 slider **逆時針**掃 24 格（6 個 combo），驗證負 sweep
 - 兩個 center 夾在環上的 note 之間，驗證游標進出中央圈
-- 最後回到 cell 0，驗證繞行
+- 倒數第三個 tap 回到 cell 0
+- **最後兩個 note 專門跨越 63 → 0 的接縫**，這是整個幾何最容易錯的地方：
+  - `t=10000` 的 tap 是 cell 62 width 4，靜態覆蓋 `62, 63, 0, 1`
+  - `t=10500` 的 slider 從 cell 60 順時針掃 8 格，四個 tick 的目標格是
+    `60, 62, 0, 2`——掃過接縫
+  為什麼素材一定要有這個：`geom` 的單元測試已經涵蓋接縫的算術，但 `render`
+  的 `drawArc` 對 cell 62 width 4 會算出 `a1 > 2π`，而 raylib 的 `drawRing`
+  在那種角度下畫得對不對是**單元測試抓不到的**。素材裡沒有跨接縫的 note，
+  Task 10 與 Task 11 的目視驗證就看不到這類 bug。
 
-最大 combo = 4 + 4 + 1 + 2 + 6 + 1 + 1 = **19**
+最大 combo = 4 + 4 + 1 + 2 + 6 + 1 + 1 + 1 + 4 = **24**
 
 - [ ] **Step 4: 寫測試確認這張譜面合法**
 
 Append 到 `src/chart.zig` 的測試區。把譜面內容內嵌進測試，讓它不依賴檔案系統：
 
 ```zig
-test "節拍器測試譜面合法且 max_combo 為 19" {
+test "節拍器測試譜面合法且 max_combo 為 24" {
     // 與 charts/01-metronome/song.json 同步。改一邊就要改另一邊。
     const metronome =
         \\{
@@ -1400,7 +1411,10 @@ test "節拍器測試譜面合法且 max_combo 為 19" {
         \\    { "t": 7000, "type": "slider", "cell": 48, "width": 4, "sweep": -24,
         \\      "dur": 1500, "combo": 6 },
         \\    { "t": 9000, "type": "center" },
-        \\    { "t": 9500, "type": "tap", "cell": 0, "width": 4 }
+        \\    { "t": 9500, "type": "tap", "cell": 0, "width": 4 },
+        \\    { "t": 10000, "type": "tap", "cell": 62, "width": 4 },
+        \\    { "t": 10500, "type": "slider", "cell": 60, "width": 4, "sweep": 8,
+        \\      "dur": 1000, "combo": 4 }
         \\  ]}]
         \\}
     ;
@@ -1408,11 +1422,15 @@ test "節拍器測試譜面合法且 max_combo 為 19" {
     var ch = try parse(std.testing.allocator, metronome, 0);
     defer ch.deinit();
 
-    try std.testing.expectEqual(@as(usize, 11), ch.notes.len);
-    try std.testing.expectEqual(@as(u32, 19), ch.max_combo);
+    try std.testing.expectEqual(@as(usize, 13), ch.notes.len);
+    try std.testing.expectEqual(@as(u32, 24), ch.max_combo);
     try std.testing.expectEqual(@as(i32, 0), ch.offset_ms);
     // 第二條 slider 是逆時針
     try std.testing.expectEqual(@as(i8, -24), ch.notes[8].kind.slider.sweep);
+    // 最後兩個 note 跨越 63 → 0 的接縫
+    try std.testing.expectEqual(@as(c.Cell, 62), ch.notes[11].kind.tap.cell);
+    try std.testing.expectEqual(@as(c.Cell, 60), ch.notes[12].kind.slider.from.cell);
+    try std.testing.expectEqual(@as(i8, 8), ch.notes[12].kind.slider.sweep);
 }
 ```
 
