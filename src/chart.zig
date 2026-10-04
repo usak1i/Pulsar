@@ -696,3 +696,59 @@ test "serialize 保留負的 sweep（逆時針）" {
     defer b.deinit();
     try std.testing.expectEqual(@as(i8, -20), b.notes[0].kind.slider.sweep);
 }
+
+test "節拍器測試譜面合法且 max_combo 為 19" {
+    // 與 charts/01-metronome/song.json 同步。改一邊就要改另一邊。
+    const metronome =
+        \\{
+        \\  "format": 1, "title": "Metronome 120",
+        \\  "artist": "tools/make_metronome.py", "audio": "audio.wav",
+        \\  "offset_ms": 0, "bpm": 120,
+        \\  "difficulties": [{ "name": "TEST", "level": 1, "notes": [
+        \\    { "t": 2000, "type": "tap", "cell": 0, "width": 4 },
+        \\    { "t": 2500, "type": "tap", "cell": 8, "width": 4 },
+        \\    { "t": 3000, "type": "tap", "cell": 16, "width": 4 },
+        \\    { "t": 3500, "type": "tap", "cell": 24, "width": 4 },
+        \\    { "t": 4000, "type": "slider", "cell": 24, "width": 4, "sweep": 16,
+        \\      "dur": 1000, "combo": 4 },
+        \\    { "t": 5500, "type": "center" },
+        \\    { "t": 6000, "type": "tap", "cell": 40, "width": 4 },
+        \\    { "t": 6500, "type": "tap", "cell": 48, "width": 4 },
+        \\    { "t": 7000, "type": "slider", "cell": 48, "width": 4, "sweep": -24,
+        \\      "dur": 1500, "combo": 6 },
+        \\    { "t": 9000, "type": "center" },
+        \\    { "t": 9500, "type": "tap", "cell": 0, "width": 4 }
+        \\  ]}]
+        \\}
+    ;
+
+    var ch = try parse(std.testing.allocator, metronome, 0);
+    defer ch.deinit();
+
+    try std.testing.expectEqual(@as(usize, 11), ch.notes.len);
+    try std.testing.expectEqual(@as(u32, 19), ch.max_combo);
+    try std.testing.expectEqual(@as(i32, 0), ch.offset_ms);
+    // 第二條 slider 是逆時針
+    try std.testing.expectEqual(@as(i8, -24), ch.notes[8].kind.slider.sweep);
+}
+
+test "節拍器譜面檔案（charts/01-metronome/song.json）與內嵌測試同步" {
+    // 驗證真正會被 Task 12 載入的那份檔案，而不是只驗證內嵌在測試裡的複本。
+    // 兩份內容理論上該一致，這個測試就是防止它們日後悄悄分岔。
+    const gpa = std.testing.allocator;
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(
+        std.testing.io,
+        "charts/01-metronome/song.json",
+        gpa,
+        .limited(4 << 20),
+    );
+    defer gpa.free(bytes);
+
+    var ch = try parse(gpa, bytes, 0);
+    defer ch.deinit();
+
+    try std.testing.expectEqual(@as(usize, 11), ch.notes.len);
+    try std.testing.expectEqual(@as(u32, 19), ch.max_combo);
+    try std.testing.expectEqual(@as(i32, 0), ch.offset_ms);
+    try std.testing.expectEqual(@as(i8, -24), ch.notes[8].kind.slider.sweep);
+}

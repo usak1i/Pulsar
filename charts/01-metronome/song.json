@@ -1,0 +1,29 @@
+{
+  "format": 1,
+  "title": "Metronome 120",
+  "artist": "tools/make_metronome.py",
+  "audio": "audio.wav",
+  "offset_ms": 0,
+  "bpm": 120,
+  "difficulties": [
+    {
+      "name": "TEST",
+      "level": 1,
+      "notes": [
+        { "t": 2000, "type": "tap", "cell": 0, "width": 4 },
+        { "t": 2500, "type": "tap", "cell": 8, "width": 4 },
+        { "t": 3000, "type": "tap", "cell": 16, "width": 4 },
+        { "t": 3500, "type": "tap", "cell": 24, "width": 4 },
+        { "t": 4000, "type": "slider", "cell": 24, "width": 4, "sweep": 16,
+          "dur": 1000, "combo": 4 },
+        { "t": 5500, "type": "center" },
+        { "t": 6000, "type": "tap", "cell": 40, "width": 4 },
+        { "t": 6500, "type": "tap", "cell": 48, "width": 4 },
+        { "t": 7000, "type": "slider", "cell": 48, "width": 4, "sweep": -24,
+          "dur": 1500, "combo": 6 },
+        { "t": 9000, "type": "center" },
+        { "t": 9500, "type": "tap", "cell": 0, "width": 4 }
+      ]
+    }
+  ]
+}
