@@ -22,7 +22,10 @@
         { "t": 7000, "type": "slider", "cell": 48, "width": 4, "sweep": -24,
           "dur": 1500, "combo": 6 },
         { "t": 9000, "type": "center" },
-        { "t": 9500, "type": "tap", "cell": 0, "width": 4 }
+        { "t": 9500, "type": "tap", "cell": 0, "width": 4 },
+        { "t": 10000, "type": "tap", "cell": 62, "width": 4 },
+        { "t": 10500, "type": "slider", "cell": 60, "width": 4, "sweep": 8,
+          "dur": 1000, "combo": 4 }
       ]
     }
   ]

@@ -697,7 +697,7 @@ test "serialize 保留負的 sweep（逆時針）" {
     try std.testing.expectEqual(@as(i8, -20), b.notes[0].kind.slider.sweep);
 }
 
-test "節拍器測試譜面合法且 max_combo 為 19" {
+test "節拍器測試譜面合法且 max_combo 為 24" {
     // 與 charts/01-metronome/song.json 同步。改一邊就要改另一邊。
     const metronome =
         \\{
@@ -717,7 +717,10 @@ test "節拍器測試譜面合法且 max_combo 為 19" {
         \\    { "t": 7000, "type": "slider", "cell": 48, "width": 4, "sweep": -24,
         \\      "dur": 1500, "combo": 6 },
         \\    { "t": 9000, "type": "center" },
-        \\    { "t": 9500, "type": "tap", "cell": 0, "width": 4 }
+        \\    { "t": 9500, "type": "tap", "cell": 0, "width": 4 },
+        \\    { "t": 10000, "type": "tap", "cell": 62, "width": 4 },
+        \\    { "t": 10500, "type": "slider", "cell": 60, "width": 4, "sweep": 8,
+        \\      "dur": 1000, "combo": 4 }
         \\  ]}]
         \\}
     ;
@@ -725,11 +728,15 @@ test "節拍器測試譜面合法且 max_combo 為 19" {
     var ch = try parse(std.testing.allocator, metronome, 0);
     defer ch.deinit();
 
-    try std.testing.expectEqual(@as(usize, 11), ch.notes.len);
-    try std.testing.expectEqual(@as(u32, 19), ch.max_combo);
+    try std.testing.expectEqual(@as(usize, 13), ch.notes.len);
+    try std.testing.expectEqual(@as(u32, 24), ch.max_combo);
     try std.testing.expectEqual(@as(i32, 0), ch.offset_ms);
     // 第二條 slider 是逆時針
     try std.testing.expectEqual(@as(i8, -24), ch.notes[8].kind.slider.sweep);
+    // 最後兩個 note 跨越 63 → 0 的接縫
+    try std.testing.expectEqual(@as(c.Cell, 62), ch.notes[11].kind.tap.cell);
+    try std.testing.expectEqual(@as(c.Cell, 60), ch.notes[12].kind.slider.from.cell);
+    try std.testing.expectEqual(@as(i8, 8), ch.notes[12].kind.slider.sweep);
 }
 
 test "節拍器譜面檔案（charts/01-metronome/song.json）與內嵌測試同步" {
@@ -747,8 +754,11 @@ test "節拍器譜面檔案（charts/01-metronome/song.json）與內嵌測試同
     var ch = try parse(gpa, bytes, 0);
     defer ch.deinit();
 
-    try std.testing.expectEqual(@as(usize, 11), ch.notes.len);
-    try std.testing.expectEqual(@as(u32, 19), ch.max_combo);
+    try std.testing.expectEqual(@as(usize, 13), ch.notes.len);
+    try std.testing.expectEqual(@as(u32, 24), ch.max_combo);
     try std.testing.expectEqual(@as(i32, 0), ch.offset_ms);
     try std.testing.expectEqual(@as(i8, -24), ch.notes[8].kind.slider.sweep);
+    try std.testing.expectEqual(@as(c.Cell, 62), ch.notes[11].kind.tap.cell);
+    try std.testing.expectEqual(@as(c.Cell, 60), ch.notes[12].kind.slider.from.cell);
+    try std.testing.expectEqual(@as(i8, 8), ch.notes[12].kind.slider.sweep);
 }
