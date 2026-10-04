@@ -259,6 +259,72 @@ pub fn loadFromDir(
     return parse(gpa, bytes, difficulty);
 }
 
+fn toRawNote(n: Note) RawNote {
+    return switch (n.kind) {
+        .center => .{ .t = n.time_ms, .type = "center" },
+        .tap => |arc| .{
+            .t = n.time_ms,
+            .type = "tap",
+            .cell = arc.cell,
+            .width = arc.width,
+        },
+        .slider => |s| .{
+            .t = n.time_ms,
+            .type = "slider",
+            .cell = s.from.cell,
+            .width = s.from.width,
+            .sweep = s.sweep,
+            .dur = s.duration_ms,
+            .combo = s.combo_count,
+        },
+    };
+}
+
+/// 純函式：Chart → JSON 位元組。呼叫者擁有回傳的記憶體。
+///
+/// 輸出的是單一難度的檔案（Chart 本身只持有一個難度）。
+pub fn serialize(gpa: Allocator, ch: *const Chart) error{OutOfMemory}![]u8 {
+    const raw_notes = try gpa.alloc(RawNote, ch.notes.len);
+    defer gpa.free(raw_notes);
+    for (ch.notes, 0..) |n, i| raw_notes[i] = toRawNote(n);
+
+    const diffs = [_]RawDifficulty{.{
+        .name = ch.difficulty_name,
+        .level = ch.level,
+        .notes = raw_notes,
+    }};
+
+    const song = RawSong{
+        .format = format_version,
+        .title = ch.title,
+        .artist = ch.artist,
+        .audio = ch.audio,
+        .offset_ms = ch.offset_ms,
+        .bpm = ch.bpm,
+        .difficulties = &diffs,
+    };
+
+    return std.json.Stringify.valueAlloc(gpa, song, .{
+        .whitespace = .indent_2,
+        // center note 沒有角度欄位，不要輸出一堆 null。
+        .emit_null_optional_fields = false,
+    });
+}
+
+pub const SaveError = error{OutOfMemory} || std.Io.Dir.WriteFileError;
+
+/// 寫出 `<dir>/song.json`。錄製模式與編輯器共用這條路徑。
+pub fn saveToDir(
+    gpa: Allocator,
+    io: std.Io,
+    dir: std.Io.Dir,
+    ch: *const Chart,
+) SaveError!void {
+    const bytes = try serialize(gpa, ch);
+    defer gpa.free(bytes);
+    try dir.writeFile(io, .{ .sub_path = "song.json", .data = bytes });
+}
+
 const test_json =
     \\{
     \\  "format": 1,
@@ -550,4 +616,83 @@ test "不變量: slider 的 duration 超出範圍會報錯而不是讓 @intCast 
             "\"sweep\":4,\"dur\":4000000000,\"combo\":2}",
     );
     try std.testing.expectError(error.DurationOutOfRange, parse(std.testing.allocator, j, 0));
+}
+
+test "serialize 後再 parse 得到相同的譜面" {
+    const gpa = std.testing.allocator;
+
+    var a = try parse(gpa, test_json, 0);
+    defer a.deinit();
+
+    const bytes = try serialize(gpa, &a);
+    defer gpa.free(bytes);
+
+    var b = try parse(gpa, bytes, 0);
+    defer b.deinit();
+
+    try std.testing.expectEqualStrings(a.title, b.title);
+    try std.testing.expectEqualStrings(a.artist, b.artist);
+    try std.testing.expectEqualStrings(a.audio, b.audio);
+    try std.testing.expectEqual(a.offset_ms, b.offset_ms);
+    try std.testing.expectEqual(a.bpm, b.bpm);
+    try std.testing.expectEqualStrings(a.difficulty_name, b.difficulty_name);
+    try std.testing.expectEqual(a.level, b.level);
+    try std.testing.expectEqual(a.max_combo, b.max_combo);
+    try std.testing.expectEqual(a.duration_ms, b.duration_ms);
+
+    try std.testing.expectEqual(a.notes.len, b.notes.len);
+    for (a.notes, b.notes) |x, y| {
+        try std.testing.expectEqual(x.time_ms, y.time_ms);
+        try std.testing.expectEqual(
+            @as(std.meta.Tag(NoteKind), x.kind),
+            @as(std.meta.Tag(NoteKind), y.kind),
+        );
+        switch (x.kind) {
+            .center => {},
+            .tap => |arc| {
+                try std.testing.expectEqual(arc.cell, y.kind.tap.cell);
+                try std.testing.expectEqual(arc.width, y.kind.tap.width);
+            },
+            .slider => |s| {
+                const t = y.kind.slider;
+                try std.testing.expectEqual(s.from.cell, t.from.cell);
+                try std.testing.expectEqual(s.from.width, t.from.width);
+                try std.testing.expectEqual(s.sweep, t.sweep);
+                try std.testing.expectEqual(s.duration_ms, t.duration_ms);
+                try std.testing.expectEqual(s.combo_count, t.combo_count);
+            },
+        }
+    }
+}
+
+test "serialize 不為 center note 輸出空的角度欄位" {
+    const gpa = std.testing.allocator;
+    const j = jsonWithNotes("{\"t\":0,\"type\":\"center\"}");
+
+    var ch = try parse(gpa, j, 0);
+    defer ch.deinit();
+
+    const bytes = try serialize(gpa, &ch);
+    defer gpa.free(bytes);
+
+    // center 沒有角度——輸出裡不該出現 cell/width/sweep/dur/combo 的 null。
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "null") == null);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "\"cell\"") == null);
+}
+
+test "serialize 保留負的 sweep（逆時針）" {
+    const gpa = std.testing.allocator;
+    const j = jsonWithNotes(
+        "{\"t\":0,\"type\":\"slider\",\"cell\":30,\"width\":4," ++
+            "\"sweep\":-20,\"dur\":800,\"combo\":4}",
+    );
+
+    var a = try parse(gpa, j, 0);
+    defer a.deinit();
+    const bytes = try serialize(gpa, &a);
+    defer gpa.free(bytes);
+
+    var b = try parse(gpa, bytes, 0);
+    defer b.deinit();
+    try std.testing.expectEqual(@as(i8, -20), b.notes[0].kind.slider.sweep);
 }
