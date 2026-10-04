@@ -165,6 +165,18 @@ pub const w_great: f64 = 0.8;
 pub const w_good: f64 = 0.5;
 pub const w_miss: f64 = 0.0;
 
+// === 譜面 ===
+/// 最後一個 note 結束後額外保留的時間，讓歌曲不會在命中瞬間就切場景。
+pub const chart_tail_padding_ms: i32 = 2000;
+
+/// `note.time_ms` 的絕對值上限。理由不是音樂長度，而是避免
+/// `time_ms + good_ms` 或 `time_ms + duration_ms` 在 i32 上溢位——
+/// 不受信任的譜面必須得到 error，不能讓程式 panic。
+pub const max_note_time_ms: i32 = 60 * 60 * 1000; // 1 小時
+
+/// `slider.duration_ms` 的上限，理由同上。
+pub const max_slider_duration_ms: u32 = 60 * 1000; // 1 分鐘
+
 // === 錄製模式 ===
 pub const hold_threshold_ms: f64 = 120;
 
@@ -893,6 +905,11 @@ pub fn parse(gpa: Allocator, json_bytes: []const u8, difficulty: usize) ParseErr
 
     const raw = std.json.parseFromSliceLeaky(RawSong, a, json_bytes, .{
         .ignore_unknown_fields = true,
+        // 必須指定。預設的 .alloc_if_needed 會讓「沒有轉義字元」的字串成為
+        // 指向 json_bytes 的切片而非 arena 複本——而 loadFromDir 讀完檔就會
+        // 釋放那個 buffer，於是 title/artist/audio 全部變成 use-after-free。
+        // 純函式測試永遠抓不到這個（它們的位元組還活著），只有走檔案的路徑會炸。
+        .allocate = .alloc_always,
     }) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.InvalidJson,
@@ -912,7 +929,7 @@ pub fn parse(gpa: Allocator, json_bytes: []const u8, difficulty: usize) ParseErr
     try checkNoOverlap(notes);
 
     var max_combo: u32 = 0;
-    var last_end: i32 = 0;
+    var last_end: i32 = std.math.minInt(i32);
     for (notes) |n| {
         max_combo += n.comboCount();
         last_end = @max(last_end, n.judgeEndMs());
@@ -928,7 +945,7 @@ pub fn parse(gpa: Allocator, json_bytes: []const u8, difficulty: usize) ParseErr
         .difficulty_name = diff.name,
         .level = diff.level,
         .notes = notes,
-        .duration_ms = last_end + 2000,
+        .duration_ms = last_end + c.chart_tail_padding_ms,
         .max_combo = max_combo,
     };
 }
@@ -970,8 +987,13 @@ fn requireArc(rn: RawNote) ParseError!Arc {
     return .{ .cell = @intCast(cell), .width = @intCast(width) };
 }
 
-/// 單線程不變量。用「到目前為止的最大結束時刻」而不是只比相鄰的前一個，
-/// 因為一條長 slider 可能跨過後面好幾個 note。
+/// 單線程不變量。
+///
+/// 用「到目前為止的最大結束時刻」而非只比相鄰的前一個。要誠實說明：在目前的
+/// 區間定義下兩者其實**等價**——notes 依 time_ms 排序，而每個 note 的結束時刻
+/// 都嚴格大於它的起始時刻，所以一旦某個 note 通過檢查，它的結束時刻必定是新的
+/// 最大值。running-max 仍然值得寫，是因為它不依賴這個推論：若哪天區間定義改了
+/// （例如 slider 的佔用不再含尾段），相鄰比較會立刻失效而 running-max 仍正確。
 fn checkNoOverlap(notes: []const Note) ParseError!void {
     var max_end: i32 = std.math.minInt(i32);
     for (notes, 0..) |n, i| {
@@ -1016,8 +1038,8 @@ git commit -m "feat: add chart data model and parser
 parse 是純函式（只吃位元組），loadFromDir 是薄包裝——驗證邏輯因此
 不需要 temp 目錄就能全測。spec §4 的六條不變量各有違反案例測試。
 
-單線程不變量用「到目前為止的最大結束時刻」比對，而非只比相鄰前一個，
-因為一條長 slider 會跨過後面數個 note。"
+單線程不變量用「到目前為止的最大結束時刻」比對。在目前的區間定義下它與
+相鄰比較等價，但不依賴那個推論——區間定義一改，相鄰比較就會失效。"
 ```
 
 ---
@@ -3762,6 +3784,11 @@ pub fn parseInfo(gpa: Allocator, json_bytes: []const u8) ParseError!SongInfo {
 
     const raw = std.json.parseFromSliceLeaky(RawSong, a, json_bytes, .{
         .ignore_unknown_fields = true,
+        // 必須指定。預設的 .alloc_if_needed 會讓「沒有轉義字元」的字串成為
+        // 指向 json_bytes 的切片而非 arena 複本——而 loadFromDir 讀完檔就會
+        // 釋放那個 buffer，於是 title/artist/audio 全部變成 use-after-free。
+        // 純函式測試永遠抓不到這個（它們的位元組還活著），只有走檔案的路徑會炸。
+        .allocate = .alloc_always,
     }) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.InvalidJson,
@@ -4546,7 +4573,8 @@ pub fn run(gpa: Allocator, io: std.Io, song_dir: []const u8) !void {
         .difficulty_name = "RECORDED",
         .level = 1,
         .notes = notes.items,
-        .duration_ms = notes.items[notes.items.len - 1].judgeEndMs() + 2000,
+        .duration_ms = notes.items[notes.items.len - 1].judgeEndMs() +
+            c.chart_tail_padding_ms,
         .max_combo = blk: {
             var m: u32 = 0;
             for (notes.items) |n| m += n.comboCount();

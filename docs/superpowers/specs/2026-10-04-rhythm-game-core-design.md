@@ -254,14 +254,20 @@ pub fn loadFromDir(gpa: Allocator, io: std.Io, dir: std.Io.Dir) LoadError!Chart;
 3. 每個 `slider.sweep ≠ 0`
 4. 每個 `slider.duration_ms > 0`
 5. 每個 `slider.combo_count ≥ 1`
-6. **任兩個 note 的可判定區間不重疊**
+6. `|time_ms| ≤ max_note_time_ms` 且 `slider.duration_ms ≤ max_slider_duration_ms`
+7. **任兩個 note 的可判定區間不重疊**
 
 可判定區間的定義：
 
 - `tap` / `center`：`[time_ms - good_ms, time_ms + good_ms]`
 - `slider`：`[time_ms - good_ms, time_ms + duration_ms]`
 
-不變量 6 把「單線程」從口頭約定變成機器檢查。編輯器（spec #2）重用同一個驗證器。
+不變量 6 的存在理由不是美學，是**讓溢位變成 error 而不是 panic**：
+`judgeEndMs()` 會算 `time_ms + good_ms` 或 `time_ms + duration_ms`，
+一個接近 `i32` 上限的 `t`、或一個 `u32` 裝得下但 `i32` 裝不下的 `dur`，
+都會讓程式當場 panic。本節開頭說「違反皆為 error，不做 fallback」——panic 不是 error。
+
+不變量 7 把「單線程」從口頭約定變成機器檢查。編輯器（spec #2）重用同一個驗證器。
 
 ### 檔案格式
 
