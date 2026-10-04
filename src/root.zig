@@ -7,7 +7,9 @@
 //! 每個純模組都要在這裡匯出一行，`zig build test` 才會跑到它的測試。
 
 pub const constants = @import("constants.zig");
+pub const geom = @import("geom.zig");
 
 test {
     _ = constants;
+    _ = geom;
 }
