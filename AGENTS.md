@@ -39,13 +39,26 @@ zig build -Doptimize=ReleaseFast
 三條必須守住的界線：
 
 - **`chart` 不 import 任何東西**（除 std）。只做位元組 ↔ `Chart` 結構。
+  檔案 I/O 在 `loadFromDir`，驗證邏輯在純函式 `parse`。
 - **`clock` 不 import raylib。** 兩個時間來源是注入的函式指標，
   所以測試不需要音效卡。不要為了方便直接呼叫 `rl.getTime()`。
 - **`judge` 不碰繪圖，`render` 不碰判定。** `judge` 吃 `(now_ms, zone, event)`
   吐判定結果；`render` 吃唯讀狀態快照。兩者不互相呼叫。
 
-把 raylib 的呼叫限制在 `main.zig`、`scene/`、`render.zig`、以及 `input.zig`
-取得滑鼠座標的那一層。`input.zoneAt` 本身是純函式。
+### 界線由 build graph 強制
+
+`build.zig` 有兩個模組，**只有 exe 連結 raylib**：
+
+| 模組 | root | raylib | 內容 |
+|---|---|---|---|
+| `rhythm_game` | `src/root.zig` | 否 | `constants` `geom` `chart` `clock` `judge` `scoring` |
+| exe | `src/main.zig` | 是 | `input` `render` `recorder` `scene/` |
+
+在純核心那一側寫 `@import("raylib")` 會直接編譯失敗。不要為了繞過它而把純邏輯
+搬到 exe 側——那是在拆掉唯一能自動守住這條界線的機制。
+
+純幾何（`zoneAt`、Cell ↔ 角度、環狀 arc）住在 `geom.zig`；`input.zig` 只做
+「讀 raylib 的滑鼠與鍵盤狀態，轉成 `geom` / `judge` 的純型別」這一層。
 
 ## 型別即不變量
 

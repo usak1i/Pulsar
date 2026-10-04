@@ -110,16 +110,33 @@ note 畫在判定圈上只是視覺呈現；判定只檢查游標的角度落在
 - **`judge` 不知道畫面存在，`render` 不知道判定存在。**
   `judge` 吃 `(now_ms, zone, event)` 吐判定；`render` 吃唯讀狀態快照畫圖。互不呼叫。
 
+### 這三條界線由 build graph 強制，不靠紀律
+
+`build.zig` 已經有兩個模組，而且**只有 exe 連結 raylib**：
+
+| 模組 | root | 連結 raylib | 內容 |
+|---|---|---|---|
+| `rhythm_game`（`b.addModule`） | `src/root.zig` | **否** | 純核心 |
+| exe（`b.addExecutable`） | `src/main.zig` | 是 | 視窗、繪圖、場景、輪詢 |
+
+因此純核心放進 `rhythm_game` 模組即可：**任何人在 `chart.zig` / `clock.zig` /
+`judge.zig` / `scoring.zig` / `geom.zig` 裡寫 `@import("raylib")` 會直接編譯失敗。**
+界線是編譯器保證的，不是約定。副作用是純模組的測試不需連結 raylib，跑得很快。
+
 ### 檔案佈局
 
 ```
 src/
-  main.zig       初始化、場景切換、資源生命週期
-  chart.zig      資料模型 / 載入 / 存檔 / 驗證
+  root.zig       rhythm_game 模組的 root：匯出純核心、聚集其測試
+  constants.zig  §11 的全部常數（唯一的一處）
+  geom.zig       Cell ↔ 角度、環狀 arc 包含判定、zoneAt（純函式）
+  chart.zig      資料模型 / parse / serialize / 驗證
   clock.zig      SongClock
-  input.zig      zoneAt、鍵位映射
   judge.zig      判定狀態機
   scoring.zig    達成率、combo
+
+  main.zig       exe root：--fps 解析、視窗、場景切換、資源生命週期
+  input.zig      raylib 輪詢 → geom / judge 的純型別
   render.zig     全部繪圖
   recorder.zig   錄製模式
   scene/
@@ -128,7 +145,12 @@ src/
     result.zig
 ```
 
-現有的 `src/root.zig`（`zig init` 樣板的 `add`、`printAnotherMessage`）會移除。
+上半部屬 `rhythm_game` 模組（不得碰 raylib），下半部屬 exe 模組。
+
+`input.zig` 只保留「讀 raylib 的滑鼠與鍵盤狀態」這一層；原先規劃放在它裡面的
+`zoneAt` 等純幾何移到 `geom.zig`，才能落在不連結 raylib 的那一側。
+
+現有的 `src/root.zig`（`zig init` 樣板的 `add`、`printAnotherMessage`）內容會清掉。
 
 ---
 
@@ -155,7 +177,7 @@ pub const CursorZone = union(enum) {
     outside,
 };
 
-/// 純函式，不碰 raylib。
+/// 純函式，位於 geom.zig（不連結 raylib 的那一側）。
 pub fn zoneAt(x: f32, y: f32, screen_w: f32, screen_h: f32) CursorZone;
 ```
 
@@ -207,7 +229,17 @@ pub const Chart = struct {
 
 ### 載入時驗證的不變量
 
-`chart.load()` 回傳 error union。以下違反皆為 error，不做 fallback：
+檔案 I/O 與解析刻意分離，讓驗證邏輯完全可純測：
+
+```zig
+/// 純函式：只吃位元組，不碰檔案系統。所有不變量在此驗證。
+pub fn parse(gpa: Allocator, json_bytes: []const u8) ParseError!Chart;
+
+/// 薄包裝：讀檔後交給 parse。Zig 0.16 的檔案 I/O 走 std.Io。
+pub fn loadFromDir(gpa: Allocator, io: std.Io, dir: std.Io.Dir) LoadError!Chart;
+```
+
+`parse` 回傳 error union。以下違反皆為 error，不做 fallback：
 
 1. `notes` 依 `time_ms` 遞增排序（載入時主動排序，不信任檔案內容）
 2. 每個 `Arc.width` 滿足 `1 ≤ width ≤ 64`
@@ -487,7 +519,7 @@ pub const Transition = union(enum) {
 
 統一原則：**壞譜面在選歌畫面就被攔下並顯示原因，絕不帶進遊玩場景才爆。**
 
-- JSON 解析失敗、不變量違反、音檔不存在 → `chart.load()` 回傳 error，
+- JSON 解析失敗、不變量違反、音檔不存在 → `chart.parse()` / `chart.loadFromDir()` 回傳 error，
   該歌曲在選歌畫面標為不可選，顯示失敗原因。
 - `charts/` 下找不到任何譜面 → 選歌畫面顯示說明文字，不是崩潰。
 - 音訊載入失敗 → error，不進入 `play` 場景。
@@ -522,7 +554,7 @@ pub const Transition = union(enum) {
 - `chart`：解析、序列化、round-trip、以及 §4 每一條不變量各自的違反案例
 - `clock`：以 10ms 台階跳動的錨點 → 輸出單調；暴跳 500ms → 硬重置；
   持續漂移 → 修正收斂
-- `input.zoneAt`：三個區域的邊界、cell 邊界、63 → 0 接縫
+- `geom`：`zoneAt` 的三個區域邊界、cell 邊界、環狀繞行的 63 → 0 接縫
 - `scoring`：各 note 種類的權重與達成率計算
 
 以 Zig 內建的 `test` 區塊撰寫，`zig build test` 執行。
@@ -554,10 +586,12 @@ good_ms          = 120
 
 // 時鐘
 clock_reset_ms   = 100      // 錨點誤差超過此值則硬重置而不平滑
+clock_max_correction_rate = 0.05   // 平滑修正的速率上限（佔 dt 的比例）
+                                   // 小於 1 保證輸出單調，見 §5
 
 // 視覺與輸入
 approach_ms      = 700      // note 可見時間（玩家感知的 note 速度）
-target_fps       = 240      // 預設值；可用 --fps=60|120|240 覆寫，見 §6
+default_fps      = 240      // 預設值；可用 --fps=60|120|240 覆寫，見 §6
 
 // 計分權重
 w_perfect        = 1.0
@@ -577,6 +611,6 @@ hold_threshold_ms = 120     // 超過此按住時間則記成 slider
 
 - 波形顯示、量化對齊、撤銷堆疊、播放頭控制、滑鼠放置 note
 - 重用本 spec 的：`chart` 的載入 / 存檔 / 驗證器、`SongClock`、
-  `render` 的環形繪圖、`input.zoneAt`
+  `render` 的環形繪圖、`geom` 的角度與環狀運算
 
 依賴方向為單向：編輯器需要本體的基礎設施，反之不然。
