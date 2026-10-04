@@ -859,7 +859,9 @@ pub const ParseError = error{
 /// JSON 上的形狀。與記憶體中的 tagged union 不同，所以先解到這裡再轉換。
 const RawNote = struct {
     t: i32,
-    @"type": []const u8,
+    /// `type` 不是 Zig 的保留字（它是可被遮蔽的 primitive identifier），
+    /// 所以欄位名直接寫 `type` 即可，不要加 `@""`——`zig fmt` 會把引號拿掉。
+    type: []const u8,
     cell: ?u16 = null,
     width: ?u16 = null,
     sweep: ?i8 = null,
@@ -936,13 +938,13 @@ fn lessByTime(_: void, x: Note, y: Note) bool {
 }
 
 fn convertNote(rn: RawNote) ParseError!Note {
-    if (std.mem.eql(u8, rn.@"type", "center")) {
+    if (std.mem.eql(u8, rn.type, "center")) {
         return .{ .time_ms = rn.t, .kind = .center };
     }
-    if (std.mem.eql(u8, rn.@"type", "tap")) {
+    if (std.mem.eql(u8, rn.type, "tap")) {
         return .{ .time_ms = rn.t, .kind = .{ .tap = try requireArc(rn) } };
     }
-    if (std.mem.eql(u8, rn.@"type", "slider")) {
+    if (std.mem.eql(u8, rn.type, "slider")) {
         const arc = try requireArc(rn);
         const sweep = rn.sweep orelse return error.MissingField;
         const dur = rn.dur orelse return error.MissingField;
@@ -1001,7 +1003,7 @@ Modify `src/root.zig`：確認已有 `pub const chart = @import("chart.zig");` �
 - [ ] **Step 6: 跑測試確認通過**
 
 Run: `zig build test`
-Expected: PASS（全部 21 個 chart 測試）
+Expected: PASS（全部 22 個 chart 測試）
 
 若出現記憶體洩漏報告，檢查 `errdefer arena.deinit()` 是否在每條 error 路徑上都生效，以及測試是否都有 `defer ch.deinit()`。
 
@@ -1131,16 +1133,16 @@ Expected: FAIL — `error: use of undeclared identifier 'serialize'`
 ```zig
 fn toRawNote(n: Note) RawNote {
     return switch (n.kind) {
-        .center => .{ .t = n.time_ms, .@"type" = "center" },
+        .center => .{ .t = n.time_ms, .type = "center" },
         .tap => |arc| .{
             .t = n.time_ms,
-            .@"type" = "tap",
+            .type = "tap",
             .cell = arc.cell,
             .width = arc.width,
         },
         .slider => |s| .{
             .t = n.time_ms,
-            .@"type" = "slider",
+            .type = "slider",
             .cell = s.from.cell,
             .width = s.from.width,
             .sweep = s.sweep,
@@ -1199,7 +1201,7 @@ pub fn saveToDir(
 - [ ] **Step 4: 跑測試確認通過**
 
 Run: `zig build test`
-Expected: PASS（24 個 chart 測試）
+Expected: PASS（25 個 chart 測試）
 
 若 `std.Io.Dir.WriteFileError` 或 `writeFile` 的 options 欄位名稱不符，查
 `/opt/homebrew/Cellar/zig/0.16.0/lib/zig/std/Io/Dir.zig` 裡的 `WriteFileOptions`
@@ -1387,7 +1389,7 @@ test "節拍器測試譜面合法且 max_combo 為 19" {
 - [ ] **Step 5: 跑測試確認通過**
 
 Run: `zig build test`
-Expected: PASS（25 個 chart 測試）
+Expected: PASS（26 個 chart 測試）
 
 如果這個測試回報 `error.OverlappingNotes`，表示手寫譜面的間隔不足——這正是
 不變量該攔下的事。調整 note 的時刻讓相鄰的可判定區間不重疊。
@@ -3802,7 +3804,7 @@ pub fn loadInfoFromDir(gpa: Allocator, io: std.Io, dir: std.Io.Dir) LoadError!So
 - [ ] **Step 4: 跑測試確認通過**
 
 Run: `zig build test`
-Expected: PASS（chart 測試增加到 27 個；原有的 parse 測試必須全部還在綠燈，
+Expected: PASS（chart 測試增加到 28 個；原有的 parse 測試必須全部還在綠燈，
 因為 `buildNotes` 的重構不該改變任何行為）
 
 - [ ] **Step 5: 把 SongRef 加進 transition.zig**
