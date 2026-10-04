@@ -1611,22 +1611,64 @@ test "小誤差被平滑吃掉，不瞬間跳過去" {
     try std.testing.expect(clk.nowMs() < fake_anchor_ms / 2);
 }
 
-test "持續的小誤差會收斂" {
+test "持續的小誤差會以受限的速率收斂" {
+    // 不要只斷言「最後收斂了」——那個指標可以被取巧：一個 nowMs() 直接回傳
+    // anchor 的假實作會在第一帧就「收斂」並完美通過。
+    //
+    // 改為斷言「收斂所需的帧數」落在機制推導的區間內。這同時測到兩件事：
+    // 誤差真的被吃掉了，而且是以受速率限制的方式吃掉的。
+    //
+    // 機制：種下的誤差約 45.8ms，每帧的修正預算 = rate * dt = 0.05 * 4 = 0.2ms，
+    // 所以收斂到 1ms 內需要約 (45.8 - 1) / 0.2 ≈ 224 帧。區間取 150..400。
     var clk = testClock();
     clk.update();
 
     fake_mono_ms += 4;
-    fake_anchor_ms = 50;
+    fake_anchor_ms = 50; // 種下誤差
     clk.update();
 
-    var i: u32 = 0;
-    while (i < 5000) : (i += 1) {
+    var frames_to_converge: ?u32 = null;
+    var i: u32 = 1;
+    while (i <= 2000) : (i += 1) {
         fake_mono_ms += 4;
         fake_anchor_ms += 4;
         clk.update();
+        if (frames_to_converge == null and @abs(clk.nowMs() - fake_anchor_ms) < 1.0) {
+            frames_to_converge = i;
+        }
     }
 
-    try std.testing.expect(@abs(clk.nowMs() - fake_anchor_ms) < 5);
+    const n = frames_to_converge orelse return error.NeverConverged;
+    // 下界擋住「瞬間跳過去」與 passthrough 假實作；上界擋住「修正速率過慢」。
+    try std.testing.expect(n >= 150);
+    try std.testing.expect(n <= 400);
+    // 最終殘差應該真的歸零，不是停在某個固定偏移上。
+    try std.testing.expect(@abs(clk.nowMs() - fake_anchor_ms) < 0.5);
+}
+
+test "dt <= 0 不會 panic，也不會吞掉時間差" {
+    // 這個守衛在實機上到不了（rl.getTime() 單調），但它不是裝飾：
+    // std.math.clamp 在下界大於上界時會 assert 失敗，所以沒有守衛就是 panic。
+    // 有測試才不會有人日後把它當 dead code 刪掉。
+    var clk = testClock();
+    fake_anchor_ms = 1000;
+    clk.update();
+    const before = clk.nowMs();
+
+    // 單調時鐘倒退
+    fake_mono_ms -= 50;
+    clk.update();
+    try std.testing.expectEqual(before, clk.nowMs()); // 完全沒動
+
+    // 同一帧再呼叫一次（dt == 0）
+    clk.update();
+    try std.testing.expectEqual(before, clk.nowMs());
+
+    // 關鍵：倒退的那一帧不該污染 last_mono。從原本的位置往前 8ms，
+    // 輸出就該前進約 8ms——如果守衛放在 last_mono 更新之後，這裡會看到 58ms。
+    fake_mono_ms += 58; // 回到原點 +8
+    clk.update();
+    try std.testing.expectApproxEqAbs(before + 8, clk.nowMs(), 0.5);
 }
 
 test "錨點停住時輸出仍單調前進（自由奔跑）" {
