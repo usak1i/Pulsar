@@ -1709,7 +1709,7 @@ tap/center 與 slider 共用同一個狀態機（`pending → tracking → done`
     - `Judge.deinit(gpa: Allocator)`
     - `Judge.beginFrame()` — 清掉上一帧的判定
     - `Judge.update(now_ms: f64, zone: geom.CursorZone, key_held: bool)`
-    - `Judge.keyDown(now_ms: f64, zone: geom.CursorZone)`
+    - `Judge.keyDown(now_ms: f64, zone: geom.CursorZone)` — 內部會在尾端推進滑動窗口
     - `Judge.judgements() []const Judgement`
     - `Judge.finished() bool`
 
@@ -2210,6 +2210,11 @@ pub const Judge = struct {
             }
         }
 
+        self.advanceWindow();
+    }
+
+    /// 推進滑動窗口。只往前走，所以整場遊戲的總成本是 O(note 數)。
+    fn advanceWindow(self: *Judge) void {
         while (self.first_active < self.chart.notes.len and
             self.states[self.first_active].status == .done)
         {
@@ -2219,6 +2224,13 @@ pub const Judge = struct {
 
     /// 按鍵按下。兩個觸發鍵等效，所以這裡不區分是哪一個。
     pub fn keyDown(self: *Judge, now_ms: f64, zone: CursorZone) void {
+        self.keyDownInner(now_ms, zone);
+        // keyDown 可能讓最後一個 note 變成 done，而 finished() 的語意是
+        // 「全部判完了」——所以這裡也要推進窗口，不能只在 update() 推進。
+        self.advanceWindow();
+    }
+
+    fn keyDownInner(self: *Judge, now_ms: f64, zone: CursorZone) void {
         var i = self.first_active;
         while (i < self.chart.notes.len) : (i += 1) {
             const n = self.chart.notes[i];
@@ -2912,7 +2924,8 @@ raylib 的輪詢層，以及全部的繪圖。
 - Modify: `src/main.zig`（主迴圈改成畫環 + 游標）
 
 **Interfaces:**
-- Consumes: `core.geom.{CursorZone, Arc, zoneAt, angleOf}`、`core.constants.{Cell, ring_cells, r_center, r_dead, r_judge}`、`core.judge.requiredArc`、`core.chart.{Note, Slider}`
+- Consumes: `core.geom.{CursorZone, Arc, zoneAt}`、`core.constants.{Cell, ring_cells, r_center, r_dead, r_judge, approach_ms}`、`core.judge.requiredArc`、`core.chart.{Note, Slider}`
+  （**不**使用 `geom.angleOf`：它回傳格「中心」角度 `(cell+0.5)*step`，而畫扇形需要的是格「前緣」角度 `cell*step`。`render` 自己定義 `cellAngle` 供繪圖用。）
 - Produces:
   - `input.trigger_keys: [2]rl.KeyboardKey`
   - `input.Frame = struct { zone: core.geom.CursorZone, key_held: bool, presses: u8 }`
