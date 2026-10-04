@@ -3704,7 +3704,58 @@ test "parseInfo 驗證每個難度——任一難度壞掉就整首歌失敗" {
         parseInfo(std.testing.allocator, j),
     );
 }
+
+test "loadFromDir 端對端：讀檔後釋放 buffer，字串仍然有效" {
+    // 這是 Task 3 的 Critical bug 唯一能被直接抓到的形狀。parse 的純函式測試
+    // 永遠看不見它——那些測試的輸入位元組還活著，所以「字串指向輸入 buffer」
+    // 這件事完全無害。只有走完「讀檔 → parse → 釋放 buffer」整條路才會現形。
+    const t_io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(t_io, .{ .sub_path = "song.json", .data = test_json });
+
+    var ch = try loadFromDir(std.testing.allocator, t_io, tmp.dir, 0);
+    defer ch.deinit();
+
+    // loadFromDir 內部的 defer gpa.free(bytes) 此時已經執行過了。
+    try std.testing.expectEqualStrings("Example", ch.title);
+    try std.testing.expectEqualStrings("Someone", ch.artist);
+    try std.testing.expectEqualStrings("audio.wav", ch.audio);
+    try std.testing.expectEqualStrings("BASIC", ch.difficulty_name);
+    try std.testing.expectEqual(@as(usize, 3), ch.notes.len);
+}
+
+test "loadInfoFromDir 端對端：同樣的釋放順序" {
+    const t_io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(t_io, .{ .sub_path = "song.json", .data = test_json });
+
+    var info = try loadInfoFromDir(std.testing.allocator, t_io, tmp.dir);
+    defer info.deinit();
+
+    try std.testing.expectEqualStrings("Example", info.title);
+    try std.testing.expectEqualStrings("audio.wav", info.audio);
+    try std.testing.expectEqual(@as(usize, 1), info.difficulties.len);
+}
+
+test "loadFromDir 在 song.json 不存在時回傳 error" {
+    const t_io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try std.testing.expectError(
+        error.FileNotFound,
+        loadFromDir(std.testing.allocator, t_io, tmp.dir, 0),
+    );
+}
 ```
+
+`std.testing.io` 只在 `builtin.is_test` 時存在，而 `std.testing.tmpDir` 會在
+`.zig-cache/tmp/` 下開一個隨機命名的目錄並由 `cleanup()` 刪掉——所以這三個測試
+不需要任何外部準備，也不會留下垃圾。
 
 - [ ] **Step 2: 跑測試確認失敗**
 
@@ -3831,7 +3882,7 @@ pub fn loadInfoFromDir(gpa: Allocator, io: std.Io, dir: std.Io.Dir) LoadError!So
 - [ ] **Step 4: 跑測試確認通過**
 
 Run: `zig build test`
-Expected: PASS（chart 測試增加到 28 個；原有的 parse 測試必須全部還在綠燈，
+Expected: PASS（chart 測試增加到 31 個；原有的 parse 測試必須全部還在綠燈，
 因為 `buildNotes` 的重構不該改變任何行為）
 
 - [ ] **Step 5: 把 SongRef 加進 transition.zig**
