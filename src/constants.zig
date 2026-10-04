@@ -41,6 +41,18 @@ pub const w_great: f64 = 0.8;
 pub const w_good: f64 = 0.5;
 pub const w_miss: f64 = 0.0;
 
+// === 譜面 ===
+/// 最後一個 note 結束後額外保留的時間，讓歌曲不會在命中瞬間就切場景。
+pub const chart_tail_padding_ms: i32 = 2000;
+
+/// `note.time_ms` 的絕對值上限。理由不是音樂長度，而是避免
+/// `time_ms + good_ms` 或 `time_ms + duration_ms` 在 i32 上溢位——
+/// 不受信任的譜面必須得到 error，不能讓程式 panic。
+pub const max_note_time_ms: i32 = 60 * 60 * 1000; // 1 小時
+
+/// `slider.duration_ms` 的上限，理由同上。
+pub const max_slider_duration_ms: u32 = 60 * 1000; // 1 分鐘
+
 // === 錄製模式 ===
 pub const hold_threshold_ms: f64 = 120;
 

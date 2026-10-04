@@ -99,11 +99,15 @@ pub const ParseError = error{
     InvalidDuration,
     InvalidComboCount,
     OverlappingNotes,
+    TimeOutOfRange,
+    DurationOutOfRange,
 };
 
 /// JSON 上的形狀。與記憶體中的 tagged union 不同，所以先解到這裡再轉換。
 const RawNote = struct {
     t: i32,
+    /// `type` 不是 Zig 的保留字（它是可被遮蔽的 primitive identifier），
+    /// 所以欄位名直接寫 `type` 即可，不要加 `@""`——`zig fmt` 會把引號拿掉。
     type: []const u8,
     cell: ?u16 = null,
     width: ?u16 = null,
@@ -136,6 +140,11 @@ pub fn parse(gpa: Allocator, json_bytes: []const u8, difficulty: usize) ParseErr
 
     const raw = std.json.parseFromSliceLeaky(RawSong, a, json_bytes, .{
         .ignore_unknown_fields = true,
+        // 必須指定。預設的 .alloc_if_needed 會讓「沒有轉義字元」的字串成為
+        // 指向 json_bytes 的切片而非 arena 複本——而 loadFromDir 讀完檔就會
+        // 釋放那個 buffer，於是 title/artist/audio 全部變成 use-after-free。
+        // 純函式測試永遠抓不到這個（它們的位元組還活著），只有走檔案的路徑會炸。
+        .allocate = .alloc_always,
     }) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.InvalidJson,
@@ -155,7 +164,7 @@ pub fn parse(gpa: Allocator, json_bytes: []const u8, difficulty: usize) ParseErr
     try checkNoOverlap(notes);
 
     var max_combo: u32 = 0;
-    var last_end: i32 = 0;
+    var last_end: i32 = std.math.minInt(i32);
     for (notes) |n| {
         max_combo += n.comboCount();
         last_end = @max(last_end, n.judgeEndMs());
@@ -171,7 +180,7 @@ pub fn parse(gpa: Allocator, json_bytes: []const u8, difficulty: usize) ParseErr
         .difficulty_name = diff.name,
         .level = diff.level,
         .notes = notes,
-        .duration_ms = last_end + 2000,
+        .duration_ms = last_end + c.chart_tail_padding_ms,
         .max_combo = max_combo,
     };
 }
@@ -181,6 +190,10 @@ fn lessByTime(_: void, x: Note, y: Note) bool {
 }
 
 fn convertNote(rn: RawNote) ParseError!Note {
+    // 先擋下 time_ms 的範圍，否則 judgeStartMs/judgeEndMs 的加減法可能在
+    // i32 上溢位而 panic——不受信任的輸入必須得到 error，不能讓程式炸掉。
+    if (rn.t > c.max_note_time_ms or rn.t < -c.max_note_time_ms) return error.TimeOutOfRange;
+
     if (std.mem.eql(u8, rn.type, "center")) {
         return .{ .time_ms = rn.t, .kind = .center };
     }
@@ -194,6 +207,9 @@ fn convertNote(rn: RawNote) ParseError!Note {
         const combo = rn.combo orelse return error.MissingField;
         if (sweep == 0) return error.InvalidSweep;
         if (dur == 0) return error.InvalidDuration;
+        // dur 是 u32，JSON 裡可以塞進一個合法的 u32 但遠超過 i32 能表示的範圍
+        // （例如 4_000_000_000）；judgeEndMs 把它轉成 i32 相加，必須先在這裡擋掉。
+        if (dur > c.max_slider_duration_ms) return error.DurationOutOfRange;
         if (combo == 0) return error.InvalidComboCount;
         return .{ .time_ms = rn.t, .kind = .{ .slider = .{
             .from = arc,
@@ -213,8 +229,13 @@ fn requireArc(rn: RawNote) ParseError!Arc {
     return .{ .cell = @intCast(cell), .width = @intCast(width) };
 }
 
-/// 單線程不變量。用「到目前為止的最大結束時刻」而不是只比相鄰的前一個，
-/// 因為一條長 slider 可能跨過後面好幾個 note。
+/// 單線程不變量。
+///
+/// 用「到目前為止的最大結束時刻」而非只比相鄰的前一個。要誠實說明：在目前的
+/// 區間定義下兩者其實**等價**——notes 依 time_ms 排序，而每個 note 的結束時刻
+/// 都嚴格大於它的起始時刻，所以一旦某個 note 通過檢查，它的結束時刻必定是新的
+/// 最大值。running-max 仍然值得寫，是因為它不依賴這個推論：若哪天區間定義改了
+/// （例如 slider 的佔用不再含尾段），相鄰比較會立刻失效而 running-max 仍正確。
 fn checkNoOverlap(notes: []const Note) ParseError!void {
     var max_end: i32 = std.math.minInt(i32);
     for (notes, 0..) |n, i| {
@@ -446,7 +467,7 @@ test "單線程: 間隔足夠的 note 可以通過" {
     try std.testing.expectEqual(@as(usize, 2), ch.notes.len);
 }
 
-test "單線程: 長 slider 之後的 note 也要被檢查（不只比相鄰）" {
+test "單線程: 長 slider 的佔用涵蓋整段按住期間" {
     // slider t=0 dur=5000 → 佔 [-120, 5000]
     // center t=100 會被排在它後面，且與它重疊
     const j = jsonWithNotes(
@@ -463,4 +484,70 @@ test "parse 壞掉的 JSON" {
         error.InvalidJson,
         parse(std.testing.allocator, "{ not json", 0),
     );
+}
+
+test "不變量: 恰好相接的判定區間視為重疊（邊界用 <=）" {
+    // good_ms = 120，t=0 佔 [-120,120]，t=240 佔 [120,360] → 恰好在 120 相接
+    const j = jsonWithNotes(
+        "{\"t\":0,\"type\":\"center\"},{\"t\":240,\"type\":\"center\"}",
+    );
+    try std.testing.expectError(error.OverlappingNotes, parse(std.testing.allocator, j, 0));
+}
+
+test "單線程: 比恰好相接多 1ms 的間隔算合法" {
+    // t=0 佔 [-120,120]，t=241 佔 [121,361] → 不重疊
+    const j = jsonWithNotes(
+        "{\"t\":0,\"type\":\"center\"},{\"t\":241,\"type\":\"center\"}",
+    );
+    var ch = try parse(std.testing.allocator, j, 0);
+    defer ch.deinit();
+    try std.testing.expectEqual(@as(usize, 2), ch.notes.len);
+}
+
+test "duration_ms 等於最後一個 note 的判定終點加上尾段緩衝" {
+    const j = jsonWithNotes("{\"t\":1000,\"type\":\"center\"}");
+    var ch = try parse(std.testing.allocator, j, 0);
+    defer ch.deinit();
+    // judgeEndMs = 1000 + good_ms(120) = 1120；+ chart_tail_padding_ms(2000) = 3120
+    try std.testing.expectEqual(@as(i32, 3120), ch.duration_ms);
+}
+
+test "duration_ms 不會被全為負時間的譜面誤夾成固定值" {
+    // 若 last_end 的初始值是 0 而非 minInt(i32)，這裡會被誤夾成
+    // 0 + chart_tail_padding_ms(2000)，而非真正的判定終點。
+    const j = jsonWithNotes("{\"t\":-1000,\"type\":\"center\"}");
+    var ch = try parse(std.testing.allocator, j, 0);
+    defer ch.deinit();
+    // judgeEndMs = -1000 + 120 = -880；+ 2000 = 1120
+    try std.testing.expectEqual(@as(i32, 1120), ch.duration_ms);
+}
+
+test "不變量: note 的 time 超出範圍會報錯而不是讓加法溢位 panic" {
+    // t 本身就是 i32 的最大值，time_ms + good_ms 在 i32 上會溢位。
+    const j = jsonWithNotes("{\"t\":2147483647,\"type\":\"center\"}");
+    try std.testing.expectError(error.TimeOutOfRange, parse(std.testing.allocator, j, 0));
+}
+
+test "parse 把字串複製進 arena，不會指向輸入的 json_bytes" {
+    // 沒有轉義字元的字串（例如 "Example"）在 std.json 預設的 .alloc_if_needed
+    // 下會是指向 json_bytes 的切片，而不是 arena 複本。loadFromDir 讀完檔就會
+    // free 掉那個 buffer，於是這裡若不是 arena 複本就是 use-after-free。
+    // 這個測試直接檢查位址，不用碰檔案系統就能把這個迴歸釘住。
+    var ch = try parse(std.testing.allocator, test_json, 0);
+    defer ch.deinit();
+
+    const input_start = @intFromPtr(test_json.ptr);
+    const input_end = input_start + test_json.len;
+    const title_ptr = @intFromPtr(ch.title.ptr);
+    try std.testing.expect(title_ptr < input_start or title_ptr >= input_end);
+}
+
+test "不變量: slider 的 duration 超出範圍會報錯而不是讓 @intCast panic" {
+    // 4_000_000_000 放得進 u32（dur 的型別），但遠超過 i32 能表示的範圍；
+    // judgeEndMs 把它轉成 i32 相加時若不先擋下就會 panic。
+    const j = jsonWithNotes(
+        "{\"t\":0,\"type\":\"slider\",\"cell\":0,\"width\":4," ++
+            "\"sweep\":4,\"dur\":4000000000,\"combo\":2}",
+    );
+    try std.testing.expectError(error.DurationOutOfRange, parse(std.testing.allocator, j, 0));
 }
