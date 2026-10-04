@@ -1,18 +1,13 @@
-//! By convention, root.zig is the root source file when making a package.
-const std = @import("std");
-const Io = std.Io;
+//! `rhythm_game` 模組的 root。
+//!
+//! 這一側是純核心：不得 `@import("raylib")`。
+//! `build.zig` 沒有把 raylib 加進本模組，所以寫了會直接編譯失敗——
+//! 「純核心不碰 raylib」這條界線是編譯器保證的，不是約定。
+//!
+//! 每個純模組都要在這裡匯出一行，`zig build test` 才會跑到它的測試。
 
-/// This is a documentation comment to explain the `printAnotherMessage` function below.
-///
-/// Accepting an `Io.Writer` instance is a handy way to write reusable code.
-pub fn printAnotherMessage(writer: *Io.Writer) Io.Writer.Error!void {
-    try writer.print("Run `zig build test` to run the tests.\n", .{});
-}
+pub const constants = @import("constants.zig");
 
-pub fn add(a: i32, b: i32) i32 {
-    return a + b;
-}
-
-test "basic add functionality" {
-    try std.testing.expect(add(3, 7) == 10);
+test {
+    _ = constants;
 }
