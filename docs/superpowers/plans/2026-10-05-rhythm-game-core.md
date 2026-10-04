@@ -27,6 +27,10 @@
 - 幀率：`--fps=60|120|240`，預設 240。
 - 每個 note 的**計分單位數恰好等於它的 combo 數**（tap/center = 1，slider = `combo_count`）。滿分 = 整張譜面的最大 combo。
 - Combo 只在 MISS / 落空時斷，GOOD 不斷。
+- **`zig build test` 的工作目錄是專案根目錄**（Task 5 實測確認：把
+  `charts/01-metronome/song.json` 改名會讓從磁碟讀取的測試得到 `FileNotFound`）。
+  所以測試裡 `std.Io.Dir.cwd()` 的相對路徑是相對 repo 根解析的，`charts/...`
+  可以直接用。不需要 `..` 之類的路徑拼湊。
 - **各 task 散文裡的測試數只是參考值，不是驗收條件。** 修正輪會增加測試，所以
   真正的基線是「這個 task 開始前 `zig build test` 報的數字」。只要既有測試全綠
   且新測試都加上了就算通過；數字與散文不符時以實際觀察為準並在 report 裡註明，

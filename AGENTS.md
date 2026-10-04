@@ -92,6 +92,22 @@ zig build -Doptimize=ReleaseFast
 
 全部集中在 spec §11 列出的那一處。調手感時改那裡，不要把數字散落在各模組。
 
+## 已實測的環境事實
+
+這幾件事都是真的跑過才寫下來的，不要憑記憶推翻：
+
+- **`zig build test` 的 cwd 是專案根目錄。** 測試裡 `std.Io.Dir.cwd()` 的相對
+  路徑相對 repo 根解析，所以 `charts/01-metronome/song.json` 直接可用。
+- **`std.testing.tmpDir(.{})` 與 `std.testing.io` 可用**（後者只在
+  `builtin.is_test` 時存在）。要測檔案 I/O 就用 tmpDir，不要寫進 repo。
+- **Zig 不分析沒被引用的宣告。** 驗證模組界線時必須寫一段真的會用到 raylib
+  且本身會被分析的程式碼（例如放在 `test` 區塊裡），光加一行 import 不會報錯。
+- **`type` 不是保留字**，是可被遮蔽的 primitive identifier。struct 欄位直接寫
+  `type`，不要加 `@""`——`zig fmt` 會把引號拿掉。
+- **`std.json.parseFromSliceLeaky` 預設 `.alloc_if_needed`**，會讓沒有轉義字元的
+  字串變成指向輸入 buffer 的切片。任何「解析完就釋放輸入」的路徑都必須傳
+  `.allocate = .alloc_always`，否則字串懸空。`chart.parse` 有回歸測試守著。
+
 ## 測試
 
 - **最高價值的測試**：腳本化輸入 + 注入時鐘 → 不開視窗打完整首歌，
