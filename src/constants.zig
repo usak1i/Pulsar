@@ -1,10 +1,13 @@
 //! spec §11 的全部常數。調手感只改這裡，不要把數字散落到各模組。
 
+const std = @import("std");
+
 // === 環幾何 ===
 pub const ring_cells = 64;
 
 /// u6 的值域恰好等於 0..63，所以不存在越界的 cell：
-/// 程式中不需要任何 cell 範圍檢查，環狀繞行也不需取模。
+/// 程式中不需要任何 cell 範圍檢查。單步前進用 +% 就免費繞行，
+/// 任意正負位移則交給 @mod 處理。
 /// 這個對應關係由本檔最後的 comptime 斷言守住。
 pub const Cell = u6;
 
@@ -40,8 +43,6 @@ pub const w_miss: f64 = 0.0;
 
 // === 錄製模式 ===
 pub const hold_threshold_ms: f64 = 120;
-
-const std = @import("std");
 
 comptime {
     // 型別即不變量：改 ring_cells 就必須同步改 Cell，否則編譯不過。
