@@ -10,8 +10,10 @@
 
 pub const constants = @import("constants.zig");
 pub const geom = @import("geom.zig");
+pub const chart = @import("chart.zig");
 
 test {
     _ = constants;
     _ = geom;
+    _ = chart;
 }
