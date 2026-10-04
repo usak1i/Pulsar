@@ -507,6 +507,13 @@ zoneAt 的 ring 區無外緣上限，見 spec §2 的理由。"
 
 Create `src/chart.zig`，只放測試：
 
+**先做這件事，否則 Step 2 的預期失敗不會發生**：同時把本模組登記進 `src/root.zig`
+（`pub const <name> = @import("<name>.zig");` 外加 `test` 區塊裡的 `_ = <name>;`）。
+**Zig 只編譯從模組 root 可達的檔案**——沒登記的話，這個新檔案根本不會被編譯，
+`zig build test` 會直接通過而不是報「找不到識別字」，TDD 的紅燈就不存在了。
+下方的「加進模組 root」步驟因此只是確認，不是新工作。
+
+
 ```zig
 const std = @import("std");
 const c = @import("constants.zig");
@@ -989,7 +996,7 @@ pub fn loadFromDir(
 
 - [ ] **Step 5: 加進模組 root**
 
-Modify `src/root.zig`：加 `pub const chart = @import("chart.zig");`，並在 `test` 區塊加 `_ = chart;`。
+Modify `src/root.zig`：確認已有 `pub const chart = @import("chart.zig");` 與 `test` 區塊裡的 `_ = chart;`（Step 1 應已完成）。若當初漏了，現在補上。
 
 - [ ] **Step 6: 跑測試確認通過**
 
@@ -1432,6 +1439,13 @@ git commit -m "test: add deterministic metronome fixture
 
 Create `src/clock.zig`，只放測試：
 
+**先做這件事，否則 Step 2 的預期失敗不會發生**：同時把本模組登記進 `src/root.zig`
+（`pub const <name> = @import("<name>.zig");` 外加 `test` 區塊裡的 `_ = <name>;`）。
+**Zig 只編譯從模組 root 可達的檔案**——沒登記的話，這個新檔案根本不會被編譯，
+`zig build test` 會直接通過而不是報「找不到識別字」，TDD 的紅燈就不存在了。
+下方的「加進模組 root」步驟因此只是確認，不是新工作。
+
+
 ```zig
 const std = @import("std");
 const c = @import("constants.zig");
@@ -1673,7 +1687,7 @@ pub const SongClock = struct {
 
 - [ ] **Step 4: 加進模組 root**
 
-Modify `src/root.zig`：加 `pub const clock = @import("clock.zig");`，並在 `test` 區塊加 `_ = clock;`。
+Modify `src/root.zig`：確認已有 `pub const clock = @import("clock.zig");` 與 `test` 區塊裡的 `_ = clock;`（Step 1 應已完成）。若當初漏了，現在補上。
 
 - [ ] **Step 5: 跑測試確認通過**
 
@@ -1734,6 +1748,13 @@ tap/center 與 slider 共用同一個狀態機（`pending → tracking → done`
 - [ ] **Step 1: 寫失敗的測試**
 
 Create `src/judge.zig`，只放測試：
+
+**先做這件事，否則 Step 2 的預期失敗不會發生**：同時把本模組登記進 `src/root.zig`
+（`pub const <name> = @import("<name>.zig");` 外加 `test` 區塊裡的 `_ = <name>;`）。
+**Zig 只編譯從模組 root 可達的檔案**——沒登記的話，這個新檔案根本不會被編譯，
+`zig build test` 會直接通過而不是報「找不到識別字」，TDD 的紅燈就不存在了。
+下方的「加進模組 root」步驟因此只是確認，不是新工作。
+
 
 ```zig
 const std = @import("std");
@@ -2319,7 +2340,7 @@ pub const Judge = struct {
 
 - [ ] **Step 5: 加進模組 root**
 
-Modify `src/root.zig`：加 `pub const judge = @import("judge.zig");`，並在 `test` 區塊加 `_ = judge;`。
+Modify `src/root.zig`：確認已有 `pub const judge = @import("judge.zig");` 與 `test` 區塊裡的 `_ = judge;`（Step 1 應已完成）。若當初漏了，現在補上。
 
 - [ ] **Step 6: 跑測試確認通過**
 
@@ -2368,6 +2389,13 @@ tap/center 的時機判定與 slider 的 tick 追蹤共用同一個狀態機
 - [ ] **Step 1: 寫失敗的測試**
 
 Create `src/scoring.zig`，只放測試：
+
+**先做這件事，否則 Step 2 的預期失敗不會發生**：同時把本模組登記進 `src/root.zig`
+（`pub const <name> = @import("<name>.zig");` 外加 `test` 區塊裡的 `_ = <name>;`）。
+**Zig 只編譯從模組 root 可達的檔案**——沒登記的話，這個新檔案根本不會被編譯，
+`zig build test` 會直接通過而不是報「找不到識別字」，TDD 的紅燈就不存在了。
+下方的「加進模組 root」步驟因此只是確認，不是新工作。
+
 
 ```zig
 const std = @import("std");
@@ -2704,7 +2732,7 @@ pub const Scorer = struct {
 
 - [ ] **Step 4: 加進模組 root**
 
-Modify `src/root.zig`：加 `pub const scoring = @import("scoring.zig");`，並在 `test` 區塊加 `_ = scoring;`。
+Modify `src/root.zig`：確認已有 `pub const scoring = @import("scoring.zig");` 與 `test` 區塊裡的 `_ = scoring;`（Step 1 應已完成）。若當初漏了，現在補上。
 
 - [ ] **Step 5: 跑測試確認通過**
 
