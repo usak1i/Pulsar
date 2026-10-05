@@ -199,6 +199,14 @@ fn simulate(ch: *const chart_mod.Chart, opts: SimOptions) !Summary {
         // 用這一帧還是下一帧的 zone/key_held 評定——當玩家在那兩帧之間
         // 放開鍵時，兩種順序的最終 achievement 差了一倍（50% vs 100%）。
         // 保持這個順序與 judge.zig 的文件化契約一致。
+        //
+        // 「update/keyDown 的呼叫順序確實可觀察」那個測試直接驅動
+        // Judge，證明的是 judge.zig 層面的順序敏感性，不會因為這裡
+        // 對調而失敗。真正會抓到「有人把下面這兩行對調」的是
+        // 「simulate 本身的 update→keyDown 順序也被釘住」那個測試——
+        // 它是直接透過 simulate() 呼叫重建同一種邊界情況，實測對調後
+        // max_combo 從 1 變成 2，該測試會失敗。這兩行順序被改動時，
+        // 先看那個測試，不要看上面那個。
         j.beginFrame();
         j.update(t, st.zone, st.key_held);
 
@@ -395,6 +403,49 @@ test "update/keyDown 的呼叫順序確實可觀察：邊界 tick 會跨帧漏�
     try std.testing.expectEqual(@as(u32, 0), s.miss); // tick 的 MISS 是 coverage，不計入
     try std.testing.expectEqual(@as(u32, 0), s.combo); // 被 tick 的 MISS 斷掉
     try std.testing.expectEqual(@as(u32, 1), s.max_combo);
+}
+
+test "simulate 本身的 update→keyDown 順序也被釘住：對調會讓 max_combo 從 1 變成 2" {
+    // 上一個測試直接驅動 Judge，證明順序在 judge.zig 層面可觀察，但沒有
+    // 釘住 simulate() 自己呼叫 update/keyDown 的那兩行——如果有人把
+    // simulate 裡的順序對調，上一個測試仍然會過，這個洞才是真正的風險
+    // （因為 simulate 是整個離線整合測試的唯一入口）。這個測試透過
+    // simulate 本身（而不是手動餵 Judge）重建同一種邊界情況。
+    //
+    // 同一張 duration=40ms、combo=2 的 slider。timing_offset_ms=40 把頭
+    // 判定延後恰好 40ms（= perfect_ms，邊界值，仍是 PERFECT）：
+    //   - simulate 的取樣帧從 judgeStartMs()-200 = 680 開始，4ms 一帧，
+    //     1040 剛好在格上（680 + 4*90），所以 want=1000+40=1040 這一帧
+    //     會準確觸發按鍵（[1040,1044) 區間）。
+    //   - slider 的追蹤區間是 [1000,1040]（含端點），所以在 t=1040 這一帧，
+    //     idealState 仍然回傳追蹤中的 zone、key_held=true；下一帧 t=1044
+    //     追蹤區間已經結束，idealState 回傳 outside/false。
+    //   - tick 1 到期於 1020，早於 1040，已經過期但還沒被評（要等頭判定
+    //     轉成 tracking 之後才會被 advanceTicks 檢查到）。
+    //
+    // 文件化順序（update 先）：t=1040 這一帧 update() 跑在 pending 狀態，
+    // no-op；keyDown() 之後才轉 tracking。tick 1 留到 t=1044 這一帧才被
+    // 評，但那一帧 key_held 已經是 false → MISS。
+    // 對調後（keyDown 先）：keyDown() 在 t=1040 先轉 tracking；
+    // update() 在同一帧，用同一帧「追蹤區間最後一刻、key_held 仍為
+    // true」的輸入立刻評 tick 1 → PERFECT。
+    //
+    // 斷言用 max_combo（1 vs 2）當主要依據：它只數「中或不中」，跟
+    // perfect_ms/great_ms/good_ms 的權重或邊界無關，所以調判定窗不會讓
+    // 這個斷言失真。achievement（50）也附帶斷言，但它依賴頭判定剛好卡在
+    // |dt| = 40 == perfect_ms 這個邊界值才會是 PERFECT 而不是 GREAT——
+    // 那是邊界巧合，不是這個測試要釘住的核心不變量。
+    var ch = try makeChart(
+        "{\"t\":1000,\"type\":\"slider\",\"cell\":10,\"width\":4," ++
+            "\"sweep\":8,\"dur\":40,\"combo\":2}",
+    );
+    defer ch.deinit();
+    try std.testing.expectEqual(@as(u32, 2), ch.max_combo);
+
+    const s = try simulate(&ch, .{ .timing_offset_ms = 40 });
+    try std.testing.expectEqual(@as(u32, 1), s.max_combo);
+    // 邊界巧合，見上方註解：|dt| = 40 == perfect_ms。
+    try std.testing.expectApproxEqAbs(@as(f64, 50), s.achievement, 1e-9);
 }
 
 test "空譜面以外的分母永遠是 max_combo" {
