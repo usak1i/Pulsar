@@ -12,10 +12,12 @@ pub const constants = @import("constants.zig");
 pub const geom = @import("geom.zig");
 pub const chart = @import("chart.zig");
 pub const clock = @import("clock.zig");
+pub const judge = @import("judge.zig");
 
 test {
     _ = constants;
     _ = geom;
     _ = chart;
     _ = clock;
+    _ = judge;
 }
