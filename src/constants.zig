@@ -53,6 +53,19 @@ pub const max_note_time_ms: i32 = 60 * 60 * 1000; // 1 小時
 /// `slider.duration_ms` 的上限，理由同上。
 pub const max_slider_duration_ms: u32 = 60 * 1000; // 1 分鐘
 
+/// slider 的 tick 間距（duration_ms / combo_count）下限。combo_count 是
+/// u8 而 duration_ms 沒有下限，所以像 dur=1000 combo=255 這種譜面會讓 tick
+/// 每 3.9ms 一個——一次掉帧就可能讓單次 advanceTicks 想塞超過
+/// max_events_per_frame 個判定。在載入時擋下，而不是讓 judge 在遊玩中
+/// 靜默丟判定。
+pub const min_tick_spacing_ms: f64 = 20;
+
+// === 判定 ===
+/// judge 每帧固定緩衝區能裝的判定數上限。有了 min_tick_spacing_ms 之後，
+/// 正常譜面在正常帧率下到不了這個數字；超出時 judge 會計入
+/// dropped_events 而不是靜默吞掉。
+pub const max_events_per_frame: usize = 64;
+
 // === 錄製模式 ===
 pub const hold_threshold_ms: f64 = 120;
 

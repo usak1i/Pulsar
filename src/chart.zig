@@ -101,6 +101,7 @@ pub const ParseError = error{
     OverlappingNotes,
     TimeOutOfRange,
     DurationOutOfRange,
+    TickSpacingTooSmall,
 };
 
 /// JSON 上的形狀。與記憶體中的 tagged union 不同，所以先解到這裡再轉換。
@@ -211,6 +212,11 @@ fn convertNote(rn: RawNote) ParseError!Note {
         // （例如 4_000_000_000）；judgeEndMs 把它轉成 i32 相加，必須先在這裡擋掉。
         if (dur > c.max_slider_duration_ms) return error.DurationOutOfRange;
         if (combo == 0) return error.InvalidComboCount;
+        // tick 間距下限。combo_count 是 u8 而 dur 沒有下限，所以
+        // dur=1000 combo=255 這種譜面會讓 tick 每 3.9ms 一個——一次掉帧就
+        // 塞爆 judge 的固定緩衝區並靜默丟掉判定。擋在載入時。
+        const spacing = @as(f64, @floatFromInt(dur)) / @as(f64, @floatFromInt(combo));
+        if (spacing < c.min_tick_spacing_ms) return error.TickSpacingTooSmall;
         return .{ .time_ms = rn.t, .kind = .{ .slider = .{
             .from = arc,
             .sweep = sweep,
@@ -499,6 +505,26 @@ test "不變量: slider 的 combo_count 必須至少 1" {
             "\"sweep\":4,\"dur\":500,\"combo\":0}",
     );
     try std.testing.expectError(error.InvalidComboCount, parse(std.testing.allocator, j, 0));
+}
+
+test "不變量: slider 的 tick 間距不得小於下限" {
+    // dur=1000 combo=255 → 間距 3.9ms，會塞爆 judge 的固定緩衝區
+    const j = jsonWithNotes(
+        "{\"t\":0,\"type\":\"slider\",\"cell\":0,\"width\":4," ++
+            "\"sweep\":4,\"dur\":1000,\"combo\":255}",
+    );
+    try std.testing.expectError(error.TickSpacingTooSmall, parse(std.testing.allocator, j, 0));
+}
+
+test "tick 間距剛好等於下限時可通過" {
+    // dur=200 combo=10 → 間距 20ms，正好在界上
+    const j = jsonWithNotes(
+        "{\"t\":0,\"type\":\"slider\",\"cell\":0,\"width\":4," ++
+            "\"sweep\":4,\"dur\":200,\"combo\":10}",
+    );
+    var ch = try parse(std.testing.allocator, j, 0);
+    defer ch.deinit();
+    try std.testing.expectEqual(@as(u32, 10), ch.max_combo);
 }
 
 test "不變量: slider 缺 sweep / dur / combo" {
