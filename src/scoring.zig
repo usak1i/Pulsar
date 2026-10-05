@@ -57,6 +57,13 @@ pub const Scorer = struct {
         }
 
         // 覆蓋 tick 只有中或不中，沒有級別——不計入統計。
+        //
+        // 這裡必須鍵在 j.kind（語意標籤），不是 j.tick == 0。對現有的
+        // note 種類（tap、center、slider）兩者剛好外延相同——時機判定
+        // 永遠是 tick 0——所以用 tick == 0 一樣能通過全部測試，但那只是
+        // 現有種類的巧合。一旦出現時機判定不是 tick 0 的 note 種類
+        // （例如從某個非零 tick 開始才算數的變體），tick == 0 就會悄悄
+        // 把那個 note 的時機判定排除在級別統計之外，而 kind 不會。
         if (j.kind == .timed) {
             switch (j.grade) {
                 .perfect => self.perfect += 1,
@@ -119,6 +126,15 @@ const Ideal = struct { zone: geom.CursorZone, key_held: bool };
 
 /// 「理想玩家」在時刻 t 的游標與按鍵狀態。
 /// slider 期間沿環追蹤並按住；其餘時間停在下一個 note 的頭位置。
+///
+/// 下面這段用連續的 (t-a)/dur 內插游標位置，而 judge.requiredArc 用的是
+/// 離散的 tick/combo_count。兩者只在 tick 的精確時刻才會算出同一個格；
+/// 240 FPS 的 4ms 取樣格很少恰好落在 250ms 的 tick 邊界上，所以多數帧
+/// 這條內插位置其實和 requiredArc 的目標格有一點偏差。真正讓 tracking
+/// 在既有測試裡成功的是 c.cell_tolerance（±2 格）把這個偏差吸收掉，
+/// 不是兩條公式精確一致。如果日後把 cell_tolerance 調緊，這個模擬器
+/// 會開始失敗，而原因跟被測的 judge/scoring 邏輯本身無關——是夾具的
+/// 內插精度不夠，到時候要先懷疑這裡，不要先懷疑 judge.zig。
 fn idealState(ch: *const chart_mod.Chart, t: f64, track: bool) Ideal {
     for (ch.notes) |n| {
         const s = switch (n.kind) {
@@ -173,6 +189,16 @@ fn simulate(ch: *const chart_mod.Chart, opts: SimOptions) !Summary {
 
         // 與 Task 7 文件化的順序一致：
         // beginFrame → update → keyDown → 消費 judgements
+        //
+        // 這個順序不是隨意的。把 update/keyDown 對調後跑過全部測試，
+        // 0 個失敗——但那只代表「這套 93 個測試裡沒有任何一個場景讓
+        // 順序外顯」，不代表順序不可觀察。有一個直接的反例（見下方
+        // 「update/keyDown 的呼叫順序確實可觀察」測試）：一個 tick 間距
+        // 恰好等於下限、頭判定延後到接近視窗邊緣的 slider，其覆蓋 tick
+        // 到底算在「頭判定轉成 tracking 之前」還是「之後」，會決定它是
+        // 用這一帧還是下一帧的 zone/key_held 評定——當玩家在那兩帧之間
+        // 放開鍵時，兩種順序的最終 achievement 差了一倍（50% vs 100%）。
+        // 保持這個順序與 judge.zig 的文件化契約一致。
         j.beginFrame();
         j.update(t, st.zone, st.key_held);
 
@@ -306,6 +332,69 @@ test "slider 頭 MISS 但全程追蹤 → 實得 3 / 4 單位" {
     try std.testing.expectApproxEqAbs(@as(f64, 75), s.achievement, 1e-6);
     try std.testing.expectEqual(@as(u32, 1), s.miss); // 只有 tick 0 算時機判定
     try std.testing.expectEqual(@as(u32, 3), s.max_combo);
+}
+
+test "update/keyDown 的呼叫順序確實可觀察：邊界 tick 會跨帧漏接" {
+    // 背景：審查者把 simulate 的 update/keyDown 呼叫順序對調（反轉成文件
+    // 禁止的 keyDown → update），跑了全部 93 個測試，0 個失敗。這個測試
+    // 是對「順序不可觀察」這個假設的正面反駁——不經過 simulate/idealState，
+    // 直接手動挑兩個 (now_ms, zone, key_held) 組合餵給 Judge，證明順序
+    // 確實會改變最終 Summary，而不只是改變同一帧內 judgements() 的時間點。
+    //
+    // 譜面：duration=40ms、combo=2 的 slider，只有一個覆蓋 tick（tick 1，
+    // 到期時間 = 1000 + 40*(1/2) = 1020ms）。tick 間距恰好等於
+    // min_tick_spacing_ms 下限（20ms，不是「小於」所以合法）。
+    //
+    // 第一帧 now_ms=1038：按頭（|38| <= perfect_ms → PERFECT）。這時
+    // tick 1 早就到期（1020 < 1038）但還沒被評定——它要等頭判定把狀態
+    // 轉成 tracking 之後，才會被 advanceTicks 檢查到。
+    //   文件化順序（update 先）：update() 跑在 pending 狀態，什麼都不做；
+    //   keyDown() 之後才把狀態轉成 tracking。tick 1 必須留到下一次
+    //   update() 呼叫才會被評——也就是下一帧。
+    //   反轉順序（keyDown 先）：keyDown() 先轉成 tracking，接著 update()
+    //   在同一帧、用同一帧的 zone/key_held 立刻評 tick 1。
+    //
+    // 第二帧 now_ms=1042：模擬玩家以為頭判完就放開鍵、游標離開
+    // （zone=.outside, key_held=false）。
+    //   文件化順序：tick 1 遲到下一帧才評，用的正是這個「已經放手」的
+    //   輸入 → MISS。達成率 = (1.0 + 0.0) / 2 = 50%。
+    //   反轉順序：tick 1 在第一帧、鍵還按著時就已經評完 → PERFECT。
+    //   達成率 = (1.0 + 1.0) / 2 = 100%。
+    // 兩種順序的差距不是「同一分數、不同帧顯示」，是真正不同的最終分數。
+    // 這個測試釘住文件化順序（也是 simulate 實際使用的順序）的正確結果：
+    // 50%。順序必須保持 update → keyDown，不能對調。
+    var ch = try makeChart(
+        "{\"t\":1000,\"type\":\"slider\",\"cell\":10,\"width\":4," ++
+            "\"sweep\":8,\"dur\":40,\"combo\":2}",
+    );
+    defer ch.deinit();
+    try std.testing.expectEqual(@as(u32, 2), ch.max_combo);
+
+    var j = try judge_mod.Judge.init(std.testing.allocator, &ch);
+    defer j.deinit(std.testing.allocator);
+    var sc = Scorer.init(&ch);
+
+    // 第一帧：文件化順序。update 先（note 仍是 pending，no-op），
+    // keyDown 後把頭判為 PERFECT 並轉成 tracking（tick 1 留到下一帧）。
+    j.beginFrame();
+    j.update(1038, .{ .ring = 14 }, true); // tick 1 的目標格，鍵按著——這一帧還用不到
+    j.keyDown(1038, .{ .ring = 11 }); // 頭的 arc 範圍內
+    for (j.judgements()) |jd| sc.apply(jd);
+
+    // 第二帧：鍵放開、游標離開。tick 1 此時到期，用這一帧的（失敗）輸入評定。
+    j.beginFrame();
+    j.update(1042, .outside, false);
+    for (j.judgements()) |jd| sc.apply(jd);
+
+    try std.testing.expect(j.finished());
+    try std.testing.expectEqual(@as(u32, 0), j.dropped_events);
+
+    const s = sc.summary();
+    try std.testing.expectApproxEqAbs(@as(f64, 50), s.achievement, 1e-9);
+    try std.testing.expectEqual(@as(u32, 1), s.perfect); // 只有頭判定計入級別統計
+    try std.testing.expectEqual(@as(u32, 0), s.miss); // tick 的 MISS 是 coverage，不計入
+    try std.testing.expectEqual(@as(u32, 0), s.combo); // 被 tick 的 MISS 斷掉
+    try std.testing.expectEqual(@as(u32, 1), s.max_combo);
 }
 
 test "空譜面以外的分母永遠是 max_combo" {
