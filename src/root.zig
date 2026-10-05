@@ -13,6 +13,7 @@ pub const geom = @import("geom.zig");
 pub const chart = @import("chart.zig");
 pub const clock = @import("clock.zig");
 pub const judge = @import("judge.zig");
+pub const scoring = @import("scoring.zig");
 
 test {
     _ = constants;
@@ -20,4 +21,5 @@ test {
     _ = chart;
     _ = clock;
     _ = judge;
+    _ = scoring;
 }
