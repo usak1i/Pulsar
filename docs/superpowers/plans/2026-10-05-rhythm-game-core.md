@@ -2217,6 +2217,76 @@ test "combo_count = 1 的 slider 只有 tick 0，行為等同 tap" {
     try std.testing.expect(j.finished());
 }
 
+test "slider 的頭判定也依偏差決定級別" {
+    // 原本所有 slider 測試都在 dt=0 按，所以一個「slider 頭一律給 PERFECT」
+    // 的 bug 不會被任何測試抓到。tap 有級別測試，slider 頭也必須有。
+    const cases = [_]struct { dt: f64, want: Grade }{
+        .{ .dt = 0, .want = .perfect },
+        .{ .dt = 60, .want = .great },
+        .{ .dt = -100, .want = .good },
+    };
+    for (cases) |cs| {
+        var ch = try makeChart(slider_json);
+        defer ch.deinit();
+        var j = try Judge.init(std.testing.allocator, &ch);
+        defer j.deinit(std.testing.allocator);
+
+        j.beginFrame();
+        j.keyDown(1000 + cs.dt, .{ .ring = 11 });
+
+        const got = j.judgements();
+        try std.testing.expectEqual(@as(usize, 1), got.len);
+        try std.testing.expect(got[0].kind == .timed);
+        try std.testing.expectEqual(cs.want, got[0].grade);
+    }
+}
+
+test "slider 的頭判定在錯的區域按也不消耗" {
+    // 「按錯不消耗」原本只測了 tap。slider 的頭判定走同一條路，但如果有人
+    // 只在 tap 的分支加上區域檢查，這個測試才會抓到。
+    var ch = try makeChart(slider_json);
+    defer ch.deinit();
+    var j = try Judge.init(std.testing.allocator, &ch);
+    defer j.deinit(std.testing.allocator);
+
+    j.beginFrame();
+    j.keyDown(1000, .{ .ring = 40 }); // 環上的錯誤角度
+    try std.testing.expectEqual(@as(usize, 0), j.judgements().len);
+
+    j.beginFrame();
+    j.keyDown(1010, .center); // 中央也不行
+    try std.testing.expectEqual(@as(usize, 0), j.judgements().len);
+
+    j.beginFrame();
+    j.keyDown(1020, .{ .ring = 11 }); // 回到正確角度
+    const got = j.judgements();
+    try std.testing.expectEqual(@as(usize, 1), got.len);
+    try std.testing.expectEqual(Grade.perfect, got[0].grade);
+    // 頭判完了但還有 3 個覆蓋 tick，所以還沒結束
+    try std.testing.expect(!j.finished());
+}
+
+test "center note 的判定級別也依偏差決定" {
+    const cases = [_]struct { dt: f64, want: Grade }{
+        .{ .dt = 0, .want = .perfect },
+        .{ .dt = -70, .want = .great },
+        .{ .dt = 115, .want = .good },
+    };
+    for (cases) |cs| {
+        var ch = try makeChart("{\"t\":1000,\"type\":\"center\"}");
+        defer ch.deinit();
+        var j = try Judge.init(std.testing.allocator, &ch);
+        defer j.deinit(std.testing.allocator);
+
+        j.beginFrame();
+        j.keyDown(1000 + cs.dt, .center);
+
+        const got = j.judgements();
+        try std.testing.expectEqual(@as(usize, 1), got.len);
+        try std.testing.expectEqual(cs.want, got[0].grade);
+    }
+}
+
 test "滑動窗口只在全部判完後才算 finished" {
     var ch = try makeChart(
         "{\"t\":1000,\"type\":\"tap\",\"cell\":0,\"width\":4}," ++
