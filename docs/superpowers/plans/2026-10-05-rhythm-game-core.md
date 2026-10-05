@@ -3304,36 +3304,237 @@ Transition 定義在獨立的檔案，讓場景之間互不認識——場景回
 
 ---
 
-### Task 10: input 與 render — 環形繪圖與游標高亮
+### Task 10: layout / input / render — 把繪圖數學搬進可測的那一側
 
-raylib 的輪詢層，以及全部的繪圖。
+這個 task 原本的驗證計畫是八項目視檢查。但這個環境跑不起視窗（raylib 的 GLFW
+在此無法建立視窗，`zig build run` 會在 `initWindow` 崩潰——已確認是環境而非
+程式碼：還原成未修改的 `zig init` 樣本會重現同一個崩潰），所以那八項一項都做不到。
 
-這個 task 的驗證是**視覺的**，所以把它跟一個臨時的除錯畫面一起交付：跑起來能看到環、看到當前的格跟著滑鼠移動、看到中央圈與死區的邊界。
+**對策：把 `render` 裡的純數學抽出來放進純核心，讓它變成可測的。**
 
-`ringDegrees` 那個 −90 度的偏移是最容易錯的地方——cell 0 必須出現在正上方，驗證步驟會逼你確認這件事。
+繪圖程式碼裡真正容易錯、而且錯了只能靠眼睛發現的部分，全都是座標數學：
+格編號換算成角度、角度換算成螢幕座標、我們的角度慣例換算成 raylib 扇形 API
+的角度。`rl.drawRing` 本身不會錯。所以把前者搬到不連結 raylib 的那一側，
+它就能被測——而且能被一個**閉環測試**釘死：
+
+> 把每一格的中心角度算成螢幕座標，再把那個座標餵回 `geom.zoneAt`，
+> 必須回到同一格。
+
+這一條涵蓋了「cell 0 是否在正上方」、「編號是否順時針遞增」、「有沒有偏半格」、
+「`unit` 基準對不對」、「正負號對不對」——原本整組目視檢查想驗的東西。
+渲染器與判定器從此共用同一套座標慣例，而且那個共用關係由測試保證。
 
 **Files:**
-- Create: `src/input.zig`
-- Create: `src/render.zig`
-- Modify: `src/main.zig`（主迴圈改成畫環 + 游標）
+- Create: `src/layout.zig`（**純核心**：座標數學，不連結 raylib）
+- Create: `src/input.zig`（exe：raylib 輪詢）
+- Create: `src/render.zig`（exe：只有 `rl.draw*` 呼叫）
+- Modify: `src/root.zig`（登記 `layout`）
+- Modify: `src/main.zig`（主迴圈改成畫環與游標）
 
 **Interfaces:**
-- Consumes: `core.geom.{CursorZone, Arc, zoneAt}`、`core.constants.{Cell, ring_cells, r_center, r_dead, r_judge, approach_ms}`、`core.judge.requiredArc`、`core.chart.{Note, Slider}`
-  （**不**使用 `geom.angleOf`：它回傳格「中心」角度 `(cell+0.5)*step`，而畫扇形需要的是格「前緣」角度 `cell*step`。`render` 自己定義 `cellAngle` 供繪圖用。）
+- Consumes: `core.constants.{Cell, ring_cells, r_center, r_dead, r_judge, approach_ms}`、`core.geom.{CursorZone, Arc, zoneAt, angleOf}`、`core.judge.requiredArc`、`core.chart.{Note, Slider}`
 - Produces:
-  - `input.trigger_keys: [2]rl.KeyboardKey`
-  - `input.Frame = struct { zone: core.geom.CursorZone, key_held: bool, presses: u8 }`
-  - `input.poll() Frame`
-  - `render.Layout = struct { cx: f32, cy: f32, unit: f32 }`
-    - `Layout.current() Layout`
-    - `Layout.point(angle_rad: f32, r_frac: f32) rl.Vector2`
+  - `layout.Point = struct { x: f32, y: f32 }`
+  - `layout.Layout = struct { cx: f32, cy: f32, unit: f32 }`
+    - `Layout.of(screen_w: f32, screen_h: f32) Layout`
+    - `Layout.point(angle_rad: f32, r_frac: f32) Point`
     - `Layout.radius(r_frac: f32) f32`
-  - `render.drawStage(l: Layout)` — 環、死區、中央圈、判定圈
-  - `render.drawArc(l, arc, r_in_frac, r_out_frac, color)`
-  - `render.drawCursor(l, zone)`
-  - `render.drawNote(l, note, chart_time_ms)` — 依剩餘時間決定飛行半徑
+    - `Layout.center() Point`
+  - `layout.cellAngle(cell: Cell) f32` — 格的**前緣**角度（`cell * step`）
+  - `layout.ringDegrees(angle_rad: f32) f32` — 我們的角度 → raylib 扇形角度（度）
+  - `layout.noteRadiusFrac(remaining_ms: f64) f32`
+  - `input.{trigger_keys, Frame, poll}`
+  - `render.{currentLayout, drawStage, drawArc, drawCursor, drawNote}`
 
-- [ ] **Step 1: 寫 input**
+- [ ] **Step 1: 寫 layout 的失敗測試**
+
+Create `src/layout.zig`，只放測試，**並同時在 `src/root.zig` 登記**
+（`pub const layout = @import("layout.zig");` 加上 `test` 區塊裡的 `_ = layout;`）
+——否則 Zig 不會編譯這個檔案，Step 2 的預期失敗不會發生。
+
+```zig
+const std = @import("std");
+const c = @import("constants.zig");
+const geom = @import("geom.zig");
+
+const test_w: f32 = 1280;
+const test_h: f32 = 720;
+
+test "Layout.of 以短邊的一半為半徑基準" {
+    const l = Layout.of(test_w, test_h);
+    try std.testing.expectApproxEqAbs(@as(f32, 640), l.cx, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 360), l.cy, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 360), l.unit, 0.001); // min(1280,720)/2
+}
+
+test "point 的四個方位：0 度在正上方、順時針" {
+    const l = Layout.of(800, 800); // 正方形，unit = 400
+    const r: f32 = 0.5; // 半徑 200
+
+    const up = l.point(0, r);
+    try std.testing.expectApproxEqAbs(@as(f32, 400), up.x, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 200), up.y, 0.01); // 螢幕 y 向下
+
+    const right = l.point(std.math.pi / 2.0, r);
+    try std.testing.expectApproxEqAbs(@as(f32, 600), right.x, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 400), right.y, 0.01);
+
+    const down = l.point(std.math.pi, r);
+    try std.testing.expectApproxEqAbs(@as(f32, 400), down.x, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 600), down.y, 0.01);
+
+    const left = l.point(3.0 * std.math.pi / 2.0, r);
+    try std.testing.expectApproxEqAbs(@as(f32, 200), left.x, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 400), left.y, 0.01);
+}
+
+test "繪圖座標與判定分區互為反函數（整組目視檢查的替代品）" {
+    // 這是本 task 最重要的測試。把每一格的中心角度算成螢幕座標，再餵回
+    // geom.zoneAt，必須回到同一格。
+    //
+    // 它一次涵蓋了原本要靠眼睛確認的全部：cell 0 在正上方、編號順時針遞增、
+    // 沒有偏半格、unit 基準正確、正負號正確。渲染器與判定器從此共用同一套
+    // 座標慣例，而那個共用關係由這條測試保證——不是靠註解。
+    //
+    // 在兩種長寬比上各跑一次，因為 unit 取短邊會讓非正方形更容易暴露錯誤。
+    for ([_][2]f32{ .{ 800, 800 }, .{ 1280, 720 } }) |dims| {
+        const w = dims[0];
+        const h = dims[1];
+        const l = Layout.of(w, h);
+        var cell: u32 = 0;
+        while (cell < c.ring_cells) : (cell += 1) {
+            const cc: c.Cell = @intCast(cell);
+            const p = l.point(geom.angleOf(cc), c.r_judge);
+            const z = geom.zoneAt(p.x, p.y, w, h);
+            try std.testing.expect(z == .ring);
+            try std.testing.expectEqual(cc, z.ring);
+        }
+    }
+}
+
+test "cellAngle 回傳格的前緣，不是格中心" {
+    // render 畫扇形需要前緣；geom.angleOf 回傳的是格中心。兩者差半格，
+    // 混用會讓每個 arc 偏半格——這正是審查時抓到的一個介面誤記。
+    const step = std.math.tau / @as(f32, c.ring_cells);
+    try std.testing.expectApproxEqAbs(@as(f32, 0), cellAngle(0), 1e-6);
+    try std.testing.expectApproxEqAbs(step, cellAngle(1), 1e-6);
+    // 格中心比前緣多半格
+    try std.testing.expectApproxEqAbs(cellAngle(0) + step / 2, geom.angleOf(0), 1e-6);
+}
+
+test "ringDegrees 把正上方映射到 raylib 的 -90 度" {
+    // raylib 的扇形 API 以 +X 軸為 0 度，我們以正上方為 0。
+    try std.testing.expectApproxEqAbs(@as(f32, -90), ringDegrees(0), 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 0), ringDegrees(std.math.pi / 2.0), 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 90), ringDegrees(std.math.pi), 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 180), ringDegrees(3.0 * std.math.pi / 2.0), 0.01);
+}
+
+test "ringDegrees 與 cellAngle 合用時，四個方位落在預期的度數" {
+    try std.testing.expectApproxEqAbs(@as(f32, -90), ringDegrees(cellAngle(0)), 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 0), ringDegrees(cellAngle(16)), 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 90), ringDegrees(cellAngle(32)), 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 180), ringDegrees(cellAngle(48)), 0.01);
+}
+
+test "noteRadiusFrac：剛出現在圓心，命中時抵達判定圈" {
+    try std.testing.expectApproxEqAbs(@as(f32, 0), noteRadiusFrac(c.approach_ms), 1e-6);
+    try std.testing.expectApproxEqAbs(c.r_judge, noteRadiusFrac(0), 1e-6);
+    // 一半時間過去 → 一半半徑
+    try std.testing.expectApproxEqAbs(c.r_judge / 2, noteRadiusFrac(c.approach_ms / 2), 1e-5);
+}
+
+test "noteRadiusFrac 夾住超出範圍的輸入" {
+    // 還沒進可見範圍（remaining > approach_ms）與已經過了命中時刻
+    // （remaining < 0）都不該產生超出 [0, r_judge] 的半徑。
+    try std.testing.expectApproxEqAbs(@as(f32, 0), noteRadiusFrac(c.approach_ms * 3), 1e-6);
+    try std.testing.expectApproxEqAbs(c.r_judge, noteRadiusFrac(-500), 1e-6);
+}
+```
+
+- [ ] **Step 2: 跑測試確認失敗**
+
+Run: `zig build test`
+Expected: FAIL — `error: use of undeclared identifier 'Layout'`
+
+- [ ] **Step 3: 寫 layout 的實作**
+
+在 `src/layout.zig` 的測試之前插入：
+
+```zig
+//! 環形畫面的座標數學。**純核心：不連結 raylib。**
+//!
+//! 這些函式之所以不放在 render.zig，是因為它們是繪圖裡唯一會算錯、
+//! 而且算錯只能靠眼睛發現的部分。放在這一側，它們就能被測——尤其是
+//! 「繪圖座標餵回 geom.zoneAt 必須回到同一格」那條閉環測試。
+//!
+//! 角度慣例與 geom 完全一致：0 在正上方（12 點鐘），順時針遞增。
+//! 螢幕座標的 y 向下，所以 y = cy - cos(angle) * r。
+
+pub const Point = struct { x: f32, y: f32 };
+
+pub const Layout = struct {
+    cx: f32,
+    cy: f32,
+    /// 半徑的參考單位 = min(w, h) / 2。所有半徑都以它的比例表示，
+    /// 與 geom.zoneAt 的正規化基準相同——這是閉環測試成立的前提。
+    unit: f32,
+
+    pub fn of(screen_w: f32, screen_h: f32) Layout {
+        return .{
+            .cx = screen_w / 2,
+            .cy = screen_h / 2,
+            .unit = @min(screen_w, screen_h) / 2,
+        };
+    }
+
+    pub fn radius(self: Layout, r_frac: f32) f32 {
+        return r_frac * self.unit;
+    }
+
+    pub fn center(self: Layout) Point {
+        return .{ .x = self.cx, .y = self.cy };
+    }
+
+    /// 角度（弧度，0 在正上方、順時針）+ 半徑比例 → 螢幕座標。
+    pub fn point(self: Layout, angle_rad: f32, r_frac: f32) Point {
+        return .{
+            .x = self.cx + @sin(angle_rad) * r_frac * self.unit,
+            .y = self.cy - @cos(angle_rad) * r_frac * self.unit,
+        };
+    }
+};
+
+/// 格的**前緣**角度。畫扇形要用這個；`geom.angleOf` 回傳的是格中心，
+/// 兩者差半格，混用會讓每個 arc 偏半格。
+pub fn cellAngle(cell: c.Cell) f32 {
+    const step = std.math.tau / @as(f32, c.ring_cells);
+    return @as(f32, @floatFromInt(cell)) * step;
+}
+
+/// 我們的角度（0 = 正上方，順時針）→ raylib 扇形 API 的角度（度）。
+/// raylib 的 0 度在 +X 軸，所以要往回轉 90 度。
+pub fn ringDegrees(angle_rad: f32) f32 {
+    return angle_rad * 180.0 / std.math.pi - 90.0;
+}
+
+/// note 的飛行半徑比例：剛進可見範圍時在圓心，命中時抵達判定圈。
+/// 兩端都夾住，所以超出範圍的輸入不會畫到判定圈之外或圓心之內。
+pub fn noteRadiusFrac(remaining_ms: f64) f32 {
+    const t = 1.0 - std.math.clamp(remaining_ms / c.approach_ms, 0.0, 1.0);
+    return @floatCast(t * c.r_judge);
+}
+```
+
+- [ ] **Step 4: 跑測試確認通過**
+
+Run: `zig build test`
+Expected: PASS（8 個 layout 測試全綠）
+
+「繪圖座標與判定分區互為反函數」那條若失敗，**不要去改 `geom`**——`geom` 的
+慣例已經被它自己的測試釘住了。問題在 `Layout.point` 的正負號或 `unit` 基準。
+
+- [ ] **Step 5: 寫 input**
 
 Create `src/input.zig`：
 
@@ -3379,14 +3580,17 @@ pub fn poll() Frame {
 }
 ```
 
-- [ ] **Step 2: 寫 render**
+- [ ] **Step 6: 寫 render**
 
-Create `src/render.zig`：
+Create `src/render.zig`。它只剩 `rl.draw*` 呼叫與型別轉換——所有數學都在
+`core.layout` 裡且已被測過。
 
 ```zig
 //! 全部的繪圖。純程式繫圖形，無外部素材（spec §7）。
 //!
-//! render 吃唯讀狀態、不改任何東西、不呼叫判定。
+//! 座標數學一律委派給 core.layout（純核心，有測試）。這個檔案只做兩件事：
+//! 把 layout.Point 轉成 rl.Vector2，以及呼叫 raylib 的繪圖函式。
+//! 不要在這裡重算角度或半徑——那會讓閉環測試失去意義。
 
 const std = @import("std");
 const rl = @import("raylib");
@@ -3394,69 +3598,36 @@ const core = @import("rhythm_game");
 
 const c = core.constants;
 const geom = core.geom;
+const layout = core.layout;
 
-pub const Layout = struct {
-    cx: f32,
-    cy: f32,
-    /// 半徑的參考單位 = min(w, h) / 2。所有半徑都以它的比例表示。
-    unit: f32,
-
-    pub fn current() Layout {
-        const w: f32 = @floatFromInt(rl.getScreenWidth());
-        const h: f32 = @floatFromInt(rl.getScreenHeight());
-        return .{ .cx = w / 2, .cy = h / 2, .unit = @min(w, h) / 2 };
-    }
-
-    pub fn radius(self: Layout, r_frac: f32) f32 {
-        return r_frac * self.unit;
-    }
-
-    pub fn center(self: Layout) rl.Vector2 {
-        return .{ .x = self.cx, .y = self.cy };
-    }
-
-    /// 角度（弧度，0 在正上方、順時針）+ 半徑比例 → 螢幕座標。
-    /// 與 geom.cellOf / geom.angleOf 同一套慣例。
-    pub fn point(self: Layout, angle_rad: f32, r_frac: f32) rl.Vector2 {
-        return .{
-            .x = self.cx + @sin(angle_rad) * r_frac * self.unit,
-            .y = self.cy - @cos(angle_rad) * r_frac * self.unit,
-        };
-    }
-};
-
-/// 我們的角度（0 = 正上方，順時針）→ raylib 扇形 API 的角度（度）。
-/// raylib 的 0 度在 +X 軸，所以要往回轉 90 度。
-fn ringDegrees(angle_rad: f32) f32 {
-    return angle_rad * 180.0 / std.math.pi - 90.0;
+fn v(p: layout.Point) rl.Vector2 {
+    return .{ .x = p.x, .y = p.y };
 }
 
-fn cellAngle(cell: c.Cell) f32 {
-    const step = std.math.tau / @as(f32, c.ring_cells);
-    return @as(f32, @floatFromInt(cell)) * step;
+/// 從 raylib 讀出目前的視窗尺寸，交給純核心算 Layout。
+pub fn currentLayout() layout.Layout {
+    return layout.Layout.of(
+        @floatFromInt(rl.getScreenWidth()),
+        @floatFromInt(rl.getScreenHeight()),
+    );
 }
 
-/// 環、死區邊界、中央判定圈、判定圈。
-pub fn drawStage(l: Layout) void {
-    const ctr = l.center();
+/// 環、死區邊界、中央判定圈、判定圈、刻度。
+pub fn drawStage(l: layout.Layout) void {
+    const ctr = v(l.center());
 
-    // 判定圈
     rl.drawCircleLinesV(ctr, l.radius(c.r_judge), .{ .r = 70, .g = 80, .b = 100, .a = 255 });
-
-    // 環帶的內緣（死區外緣）
     rl.drawCircleLinesV(ctr, l.radius(c.r_dead), .{ .r = 60, .g = 70, .b = 90, .a = 255 });
-
-    // 中央判定區
     rl.drawCircleV(ctr, l.radius(c.r_center), .{ .r = 25, .g = 28, .b = 38, .a = 255 });
     rl.drawCircleLinesV(ctr, l.radius(c.r_center), .{ .r = 90, .g = 100, .b = 130, .a = 255 });
 
-    // 每 8 格畫一條刻度，讓玩家有角度參考
+    // 每 8 格一條刻度，讓玩家有角度參考
     var cell: u32 = 0;
     while (cell < c.ring_cells) : (cell += 8) {
-        const a = cellAngle(@intCast(cell));
+        const a = layout.cellAngle(@intCast(cell));
         rl.drawLineEx(
-            l.point(a, c.r_dead),
-            l.point(a, c.r_judge),
+            v(l.point(a, c.r_dead)),
+            v(l.point(a, c.r_judge)),
             1,
             .{ .r = 45, .g = 52, .b = 68, .a = 255 },
         );
@@ -3465,63 +3636,67 @@ pub fn drawStage(l: Layout) void {
 
 /// 畫環上的一段 arc。
 pub fn drawArc(
-    l: Layout,
+    l: layout.Layout,
     arc: geom.Arc,
     r_in_frac: f32,
     r_out_frac: f32,
     color: rl.Color,
 ) void {
     const step = std.math.tau / @as(f32, c.ring_cells);
-    const a0 = cellAngle(arc.cell);
+    const a0 = layout.cellAngle(arc.cell);
     const a1 = a0 + @as(f32, @floatFromInt(arc.width)) * step;
     rl.drawRing(
-        l.center(),
+        v(l.center()),
         l.radius(r_in_frac),
         l.radius(r_out_frac),
-        ringDegrees(a0),
-        ringDegrees(a1),
+        layout.ringDegrees(a0),
+        layout.ringDegrees(a1),
         32,
         color,
     );
 }
 
 /// 游標指示。環被離散成 64 格而滑鼠是連續的，所以必須把當前的格畫出來。
-pub fn drawCursor(l: Layout, zone: geom.CursorZone) void {
+pub fn drawCursor(l: layout.Layout, zone: geom.CursorZone) void {
     const bright: rl.Color = .{ .r = 120, .g = 220, .b = 255, .a = 220 };
     switch (zone) {
-        .ring => |cell| drawArc(l, .{ .cell = cell, .width = 1 }, c.r_judge - 0.06, c.r_judge + 0.06, bright),
-        .center => rl.drawCircleLinesV(l.center(), l.radius(c.r_center), bright),
+        .ring => |cell| drawArc(
+            l,
+            .{ .cell = cell, .width = 1 },
+            c.r_judge - 0.06,
+            c.r_judge + 0.06,
+            bright,
+        ),
+        .center => rl.drawCircleLinesV(v(l.center()), l.radius(c.r_center), bright),
         .outside => {},
     }
 }
 
-/// note 的飛行半徑：從圓心往外，在判定時刻抵達判定圈。
-fn noteRadiusFrac(remaining_ms: f64) f32 {
-    const t = 1.0 - std.math.clamp(remaining_ms / c.approach_ms, 0.0, 1.0);
-    return @floatCast(t * c.r_judge);
-}
-
 /// 畫一個 note。chart_time_ms 是譜面時間軸上的現在。
-pub fn drawNote(l: Layout, n: core.chart.Note, chart_time_ms: f64) void {
+pub fn drawNote(l: layout.Layout, n: core.chart.Note, chart_time_ms: f64) void {
     const remaining = @as(f64, @floatFromInt(n.time_ms)) - chart_time_ms;
     if (remaining > c.approach_ms) return; // 還沒進可見範圍
-    const r = noteRadiusFrac(remaining);
+    const r = layout.noteRadiusFrac(remaining);
 
     switch (n.kind) {
         .tap => |arc| drawArc(l, arc, r - 0.03, r + 0.03, .{ .r = 240, .g = 240, .b = 250, .a = 255 }),
-        .center => rl.drawCircleLinesV(
-            l.center(),
-            l.radius(c.r_center) * (0.3 + 0.7 * @as(f32, @floatCast(1.0 - std.math.clamp(remaining / c.approach_ms, 0.0, 1.0)))),
-            .{ .r = 255, .g = 200, .b = 120, .a = 255 },
-        ),
+        .center => {
+            // 中央 note：圓心的圈隨時間收緊
+            const t = layout.noteRadiusFrac(remaining) / c.r_judge;
+            rl.drawCircleLinesV(
+                v(l.center()),
+                l.radius(c.r_center) * (0.3 + 0.7 * t),
+                .{ .r = 255, .g = 200, .b = 120, .a = 255 },
+            );
+        },
         .slider => |s| {
-            // 頭端的 arc
             drawArc(l, s.from, r - 0.04, r + 0.04, .{ .r = 150, .g = 230, .b = 180, .a = 255 });
-            // 當下應該追蹤到的位置（只在已經開始之後畫）
+            // 已經開始之後，畫出當下應該追蹤到的位置
             if (remaining <= 0) {
                 const dur: f64 = @floatFromInt(s.duration_ms);
                 const prog = std.math.clamp(-remaining / dur, 0.0, 1.0);
-                const tick: u32 = @intFromFloat(prog * @as(f64, @floatFromInt(s.combo_count)));
+                const n_ticks: f64 = @floatFromInt(s.combo_count);
+                const tick: u32 = @intFromFloat(prog * n_ticks);
                 const want = core.judge.requiredArc(s, @min(tick, s.combo_count - 1));
                 drawArc(l, want, c.r_judge - 0.05, c.r_judge + 0.05, .{ .r = 150, .g = 230, .b = 180, .a = 180 });
             }
@@ -3530,7 +3705,7 @@ pub fn drawNote(l: Layout, n: core.chart.Note, chart_time_ms: f64) void {
 }
 ```
 
-- [ ] **Step 3: 把主迴圈改成畫環與游標**
+- [ ] **Step 7: 把主迴圈改成畫環與游標**
 
 Modify `src/main.zig`：在 import 區加
 
@@ -3544,7 +3719,7 @@ const render = @import("render.zig");
 ```zig
     while (!rl.windowShouldClose()) {
         const frame = input.poll();
-        const l = render.Layout.current();
+        const l = render.currentLayout();
 
         rl.beginDrawing();
         defer rl.endDrawing();
@@ -3564,45 +3739,51 @@ const render = @import("render.zig");
     }
 ```
 
-- [ ] **Step 4: 跑測試確認沒壞**
+- [ ] **Step 8: 跑測試與編譯**
 
 Run: `zig build test`
-Expected: PASS（純核心 + main 的測試都還在）
+Expected: PASS（含 8 個新的 layout 測試）
 
-- [ ] **Step 5: 視覺驗證（這一步是本 task 的重點）**
+Run: `zig build`
+Expected: 編譯乾淨。
 
-Run: `zig build run`
+**`zig build run` 在此環境會崩潰**（GLFW 無法建立視窗），那是環境限制而非
+程式碼問題。不要為此「修」任何東西。可以執行它以確認崩潰發生在
+`initWindow` 而非更早，但要把結果如實回報為環境限制。
 
-逐項確認，**每一項都要真的看到**：
+- [ ] **Step 9: 列出 PENDING-HUMAN 項目**
 
-1. 畫面中央有一個小圓（中央判定區）、外面一圈細線（死區外緣）、再外面一圈（判定圈）
-2. 滑鼠移到環上時，判定圈上出現一格高亮，而且**高亮會跟著滑鼠轉**
-3. **滑鼠移到正上方（12 點鐘方向）時，左上角顯示 `ring cell 0`**
-4. 從正上方往右轉（順時針）時，cell 編號**遞增**：0 → 16（正右）→ 32（正下）→ 48（正左）
-5. 滑鼠移到正中央時顯示 `CENTER`，中央圈的外框變亮
-6. 在中央圈與死區外緣之間時顯示 `outside (dead zone)`，沒有任何高亮
-7. 滑鼠移到畫面角落（遠超過判定圈）時**仍然顯示 ring cell**——ring 區沒有外緣上限
-8. 按住 Z 或 X 時 `held=true`，兩個鍵都要試
+以下只有人在有顯示器的機器上才能確認。逐條寫進 report，**不得聲稱已驗證**：
 
-**如果第 3 或第 4 項不符**，問題在 `render.ringDegrees` 的 −90 度偏移或正負號。
-`geom` 的測試已經證明 `cellOf` 的慣例是對的（cell 0 在正上方、順時針遞增），
-所以不要去改 `geom`——調 `ringDegrees` 讓繪圖對上 `geom`。
+1. 畫面中央有中央判定圈、死區外緣細線、判定圈
+2. 滑鼠移到環上時判定圈出現一格高亮，且跟著滑鼠轉
+3. 滑鼠移到正上方時顯示 `ring cell 0`
+4. 順時針轉動時編號遞增：0 → 16（右）→ 32（下）→ 48（左）
+5. 滑鼠在正中央顯示 `CENTER`，中央圈外框變亮
+6. 在中央圈與死區之間顯示 `outside (dead zone)`，無任何高亮
+7. 滑鼠在畫面角落仍顯示 ring cell（ring 區無外緣上限）
+8. 按住 Z 或 X 時 `held=true`，兩鍵都要試
 
-- [ ] **Step 6: Commit**
+注意第 3、4、5、7 項的**數學部分**已經由 Step 1 的閉環測試涵蓋了——
+人要確認的是「畫出來的東西和那些數字一致」，而不是數字本身。
+
+- [ ] **Step 10: Commit**
 
 ```bash
-git add src/input.zig src/render.zig src/main.zig
-git commit -m "feat: add raylib input polling and ring rendering
+git add src/layout.zig src/input.zig src/render.zig src/root.zig src/main.zig
+git commit -m "feat: add testable layout math, raylib input polling, and ring rendering
 
-input 只把滑鼠/鍵盤狀態轉成純型別，幾何一律交給 core.geom。
-render 吃唯讀狀態、不碰判定；ringDegrees 處理「我們的 0 度在正上方」
-與 raylib「0 度在 +X 軸」之間的轉換。
+這個環境跑不起視窗（GLFW 無法建立視窗），所以原本的八項目視驗證一項都做不到。
+對策是把 render 裡的純數學抽進 core.layout——繪圖裡唯一會算錯、而且算錯只能
+靠眼睛發現的部分就是座標數學，放到不連結 raylib 的那一側它就能被測。
 
-游標的當前格會高亮在判定圈上——環是離散的 64 格而滑鼠是連續的，
-沒有這個指示遊戲不能玩（spec §7）。"
+關鍵測試是閉環的：把每一格的中心角度算成螢幕座標，再餵回 geom.zoneAt，
+必須回到同一格。它一次涵蓋 cell 0 在正上方、編號順時針、沒有偏半格、
+unit 基準正確、正負號正確——原本整組目視檢查想驗的東西。渲染器與判定器
+從此共用同一套座標慣例，而那個共用關係由測試保證而非註解。
+
+render.zig 因此只剩 rl.draw* 呼叫與 Point → Vector2 的轉換。"
 ```
-
----
 
 ### Task 11: scene/play — 把音訊、時鐘、判定、計分、繪圖接起來
 
@@ -3617,7 +3798,7 @@ render 吃唯讀狀態、不碰判定；ringDegrees 處理「我們的 0 度在�
 - Modify: `src/main.zig`（主迴圈改成跑 play 場景）
 
 **Interfaces:**
-- Consumes: `core.chart.loadFromDir`、`core.judge.Judge`、`core.scoring.Scorer`、`core.clock.SongClock`、`input.poll`、`render.*`、`transition.Transition`
+- Consumes: `core.chart.loadFromDir`、`core.judge.Judge`、`core.scoring.Scorer`、`core.clock.SongClock`、`core.layout.{Layout, cellAngle}`、`input.poll`、`render.{currentLayout, drawStage, drawCursor, drawNote}`、`transition.Transition`
 - Produces:
   - `play.Play`
     - `Play.init(self: *Play, gpa: Allocator, io: std.Io, song_dir: []const u8, difficulty: usize) !void` — 就地初始化
@@ -3793,7 +3974,7 @@ pub const Play = struct {
             self.judge.keyDown(now, frame.zone);
         }
 
-        const l = render.Layout.current();
+        const l = render.currentLayout();
         for (self.judge.judgements()) |jd| {
             self.scorer.apply(jd);
             self.effects.spawn(effectPoint(l, self.chart.notes[jd.note_index], frame.zone), jd.grade);
@@ -3813,7 +3994,7 @@ pub const Play = struct {
     }
 
     pub fn draw(self: *const Play) void {
-        const l = render.Layout.current();
+        const l = render.currentLayout();
         const now = self.chartTimeMs();
 
         render.drawStage(l);
@@ -3831,7 +4012,7 @@ pub const Play = struct {
         self.drawHud();
     }
 
-    fn drawEffects(self: *const Play, l: render.Layout) void {
+    fn drawEffects(self: *const Play, l: core.layout.Layout) void {
         _ = l;
         for (self.effects.items) |e| {
             if (!e.active) continue;
@@ -3859,23 +4040,26 @@ pub const Play = struct {
 
 /// 特效出現的位置：環上的 note 在它的 arc 中點，center note 在圓心。
 fn effectPoint(
-    l: render.Layout,
+    l: core.layout.Layout,
     n: core.chart.Note,
     zone: core.geom.CursorZone,
 ) rl.Vector2 {
     _ = zone;
+    // arc 的中點角度 = 前緣 + 寬度的一半。用 core.layout 的 cellAngle 當前緣，
+    // 不要自己重算——那條慣例由 layout 的閉環測試保證。
     const step = std.math.tau / @as(f32, c.ring_cells);
-    return switch (n.kind) {
+    const p = switch (n.kind) {
         .center => l.center(),
         .tap => |arc| l.point(
-            (@as(f32, @floatFromInt(arc.cell)) + @as(f32, @floatFromInt(arc.width)) / 2) * step,
+            core.layout.cellAngle(arc.cell) + @as(f32, @floatFromInt(arc.width)) / 2 * step,
             c.r_judge,
         ),
         .slider => |sl| l.point(
-            (@as(f32, @floatFromInt(sl.from.cell)) + @as(f32, @floatFromInt(sl.from.width)) / 2) * step,
+            core.layout.cellAngle(sl.from.cell) + @as(f32, @floatFromInt(sl.from.width)) / 2 * step,
             c.r_judge,
         ),
     };
+    return .{ .x = p.x, .y = p.y };
 }
 ```
 

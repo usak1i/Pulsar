@@ -92,6 +92,22 @@ zig build -Doptimize=ReleaseFast
 
 全部集中在 spec §11 列出的那一處。調手感時改那裡，不要把數字散落在各模組。
 
+## 這個環境跑不起視窗
+
+`zig build run` 會在 `rl.initWindow` 崩潰：GLFW 無法建立視窗
+（`WARNING: SYSTEM: Failed to initialize platform`）。已確認是環境而非程式碼
+——還原成未修改的 `zig init` 樣本會重現同一個崩潰。
+
+**所以不要為了這個崩潰去「修」任何東西**，也不要把它當成迴歸。能機器驗證的
+是 `zig build test` 與 `zig build`；需要看到畫面的事情必須標成 PENDING-HUMAN
+交給人在有顯示器的機器上確認。
+
+這也是 `src/layout.zig` 存在的理由：繪圖裡唯一會算錯、而且錯了只能靠眼睛
+發現的部分就是座標數學。把它放在不連結 raylib 的那一側，就能用一條閉環測試
+釘住——把每一格的中心角度算成螢幕座標、再餵回 `geom.zoneAt`，必須回到同一格。
+`render.zig` 因此只剩 `rl.draw*` 呼叫。**不要在 render 裡重算角度或半徑**，
+那會讓那條測試失去意義。
+
 ## 已實測的環境事實
 
 這幾件事都是真的跑過才寫下來的，不要憑記憶推翻：

@@ -138,6 +138,7 @@ src/
   root.zig       rhythm_game 模組的 root：匯出純核心、聚集其測試
   constants.zig  §11 的全部常數（唯一的一處）
   geom.zig       Cell ↔ 角度、環狀 arc 包含判定、zoneAt（純函式）
+  layout.zig     環形畫面的座標數學：格 ↔ 角度 ↔ 螢幕座標（純函式）
   chart.zig      資料模型 / parse / serialize / 驗證
   clock.zig      SongClock
   judge.zig      判定狀態機
