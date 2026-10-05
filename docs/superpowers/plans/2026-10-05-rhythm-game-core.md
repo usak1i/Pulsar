@@ -185,6 +185,14 @@ pub const max_note_time_ms: i32 = 60 * 60 * 1000; // 1 小時
 /// `slider.duration_ms` 的上限，理由同上。
 pub const max_slider_duration_ms: u32 = 60 * 1000; // 1 分鐘
 
+/// slider 的 tick 最小間距。存在的理由是 judge 每帧的判定緩衝區是固定大小的：
+/// 一次掉帧會讓多個 tick 同時到期，間距太小就會溢出而靜默丟掉判定，
+/// 導致達成率的分母永遠達不到。20ms 搭配 64 格緩衝能撐住約 1.2 秒的掉帧。
+pub const min_tick_spacing_ms: f64 = 20;
+
+/// judge 每帧判定緩衝區的大小。遊玩中不配置記憶體，所以它是固定的。
+pub const max_events_per_frame: usize = 64;
+
 // === 錄製模式 ===
 pub const hold_threshold_ms: f64 = 120;
 
@@ -701,6 +709,26 @@ test "不變量: slider 的 duration 必須大於 0" {
     try std.testing.expectError(error.InvalidDuration, parse(std.testing.allocator, j, 0));
 }
 
+test "不變量: slider 的 tick 間距不得小於下限" {
+    // dur=1000 combo=255 → 間距 3.9ms，會塞爆 judge 的固定緩衝區
+    const j = jsonWithNotes(
+        "{\"t\":0,\"type\":\"slider\",\"cell\":0,\"width\":4," ++
+            "\"sweep\":4,\"dur\":1000,\"combo\":255}",
+    );
+    try std.testing.expectError(error.TickSpacingTooSmall, parse(std.testing.allocator, j, 0));
+}
+
+test "tick 間距剛好等於下限時可通過" {
+    // dur=200 combo=10 → 間距 20ms，正好在界上
+    const j = jsonWithNotes(
+        "{\"t\":0,\"type\":\"slider\",\"cell\":0,\"width\":4," ++
+            "\"sweep\":4,\"dur\":200,\"combo\":10}",
+    );
+    var ch = try parse(std.testing.allocator, j, 0);
+    defer ch.deinit();
+    try std.testing.expectEqual(@as(u32, 10), ch.max_combo);
+}
+
 test "不變量: slider 的 combo_count 必須至少 1" {
     const j = jsonWithNotes(
         "{\"t\":0,\"type\":\"slider\",\"cell\":0,\"width\":4," ++
@@ -873,6 +901,7 @@ pub const ParseError = error{
     InvalidSweep,
     InvalidDuration,
     InvalidComboCount,
+    TickSpacingTooSmall,
     OverlappingNotes,
 };
 
@@ -977,6 +1006,12 @@ fn convertNote(rn: RawNote) ParseError!Note {
         if (sweep == 0) return error.InvalidSweep;
         if (dur == 0) return error.InvalidDuration;
         if (combo == 0) return error.InvalidComboCount;
+        if (dur > c.max_slider_duration_ms) return error.DurationOutOfRange;
+        // tick 間距下限。combo_count 是 u8 而 dur 沒有下限，所以
+        // dur=1000 combo=255 這種譜面會讓 tick 每 3.9ms 一個——一次掉帧就
+        // 塞爆 judge 的固定緩衝區並靜默丟掉判定。擋在載入時。
+        const spacing = @as(f64, @floatFromInt(dur)) / @as(f64, @floatFromInt(combo));
+        if (spacing < c.min_tick_spacing_ms) return error.TickSpacingTooSmall;
         return .{ .time_ms = rn.t, .kind = .{ .slider = .{
             .from = arc,
             .sweep = sweep,
@@ -2287,6 +2322,66 @@ test "center note 的判定級別也依偏差決定" {
     }
 }
 
+test "單次 update 跨過多個 tick 時全部評定，不是只評最後一個" {
+    // 這個測試存在的理由很具體：審查時實際做過 mutation——把 advanceTicks
+    // 改成「只評估最近一個到期的 tick」，當時 80 個測試全部通過。
+    // 原因是結構性的：其他測試都以 4ms 步進而 tick 間隔 250ms，所以從來沒有
+    // 任何一次 update 跨過超過一個 tick 邊界。「掉帧時所有到期的 tick 都要
+    // 評估」這個保證因此完全沒被驗證，而它正是「掉一帧不該斷 combo」的依據。
+    var ch = try makeChart(slider_json);
+    defer ch.deinit();
+    var j = try Judge.init(std.testing.allocator, &ch);
+    defer j.deinit(std.testing.allocator);
+
+    j.beginFrame();
+    j.keyDown(1000, .{ .ring = 11 });
+    try std.testing.expectEqual(@as(usize, 1), j.judgements().len);
+
+    // 模擬一次長達 900ms 的掉帧：tick 1/2/3（1250/1500/1750）全部同時到期。
+    // 游標停在最後一個 tick 的目標位置上。
+    const s = ch.notes[0].kind.slider;
+    const last = requiredArc(s, 3);
+    j.beginFrame();
+    j.update(1900, .{ .ring = last.cell }, true);
+
+    const got = j.judgements();
+    try std.testing.expectEqual(@as(usize, 3), got.len);
+    for (got, 1..) |jd, want_tick| {
+        try std.testing.expect(jd.kind == .coverage);
+        try std.testing.expectEqual(@as(u32, @intCast(want_tick)), jd.tick);
+    }
+    try std.testing.expect(j.finished());
+    try std.testing.expectEqual(@as(u32, 0), j.dropped_events);
+}
+
+test "游標在死區（outside）時既不能命中也不能維持 slider" {
+    // 同樣來自 mutation：把 arcHit 對 .outside 改成回傳 true，80 個測試全過。
+    // 真實後果是對玩家有利的作弊——游標停在中央圈與環之間的死區、按住鍵，
+    // 就能收走每一個 slider tick。沒有任何測試用過 .outside 按鍵或按住。
+    var ch = try makeChart(slider_json);
+    defer ch.deinit();
+    var j = try Judge.init(std.testing.allocator, &ch);
+    defer j.deinit(std.testing.allocator);
+
+    // 死區按下不得消耗頭判定
+    j.beginFrame();
+    j.keyDown(1000, .outside);
+    try std.testing.expectEqual(@as(usize, 0), j.judgements().len);
+
+    // 正確位置按下，進入追蹤
+    j.beginFrame();
+    j.keyDown(1010, .{ .ring = 11 });
+    try std.testing.expectEqual(@as(usize, 1), j.judgements().len);
+
+    // 按住但游標在死區 → tick 必須落空
+    j.beginFrame();
+    j.update(1260, .outside, true);
+    const got = j.judgements();
+    try std.testing.expectEqual(@as(usize, 1), got.len);
+    try std.testing.expect(got[0].kind == .coverage);
+    try std.testing.expectEqual(Grade.miss, got[0].grade);
+}
+
 test "滑動窗口只在全部判完後才算 finished" {
     var ch = try makeChart(
         "{\"t\":1000,\"type\":\"tap\",\"cell\":0,\"width\":4}," ++
@@ -2322,6 +2417,14 @@ Expected: FAIL — `error: use of undeclared identifier 'Judge'`
 //!
 //! 每帧的呼叫順序：
 //!   beginFrame() → update() → 每個按下事件各一次 keyDown() → 消費 judgements()
+//!
+//! **契約：同一首歌之內 now_ms 必須單調不減。** 所有狀態（first_active、
+//! next_tick）只往前走，沒有重新同步的機制。如果時間向後跳（SongClock 在
+//! 錨點誤差超過 clock_reset_ms 時會硬重置，而那可以是向後的），已經判過
+//! MISS 的 note 會被音訊重播但 keyDown 會在 judgeStartMs > now_ms 處直接
+//! break——那段區間裡的每次按鍵都會被靜默丟棄，既不計分也不算 MISS。
+//! 呼叫端偵測到向後跳時必須結束這一局或重新 init，不能繼續餵。
+//! Task 11 的 play 場景負責這件事。
 //!
 //! 狀態陣列在 init 時配置一次；遊玩中不配置記憶體。
 
@@ -2397,8 +2500,7 @@ const NoteState = struct {
 
 ```zig
 pub const Judge = struct {
-    /// 單線程譜面每帧最多也不會產生很多判定；超出就丟棄（不會發生）。
-    pub const max_events_per_frame = 64;
+    pub const max_events_per_frame = c.max_events_per_frame;
 
     chart: *const Chart,
     states: []NoteState,
@@ -2407,6 +2509,10 @@ pub const Judge = struct {
 
     event_buf: [max_events_per_frame]Judgement = undefined,
     event_count: usize = 0,
+
+    /// 因緩衝區滿而被丟掉的判定數。正常譜面上恆為 0；不為 0 代表
+    /// 計分的輸入已經不完整，呼叫端應該視為錯誤而非忽略。
+    dropped_events: u32 = 0,
 
     /// 進入 play 場景時配置一次。
     pub fn init(gpa: Allocator, ch: *const Chart) Allocator.Error!Judge {
@@ -2426,6 +2532,10 @@ pub const Judge = struct {
     }
 
     /// 本帧累積的判定。在下一次 beginFrame 之前有效。
+    ///
+    /// 回傳的切片指向 self 內部的陣列。Judge 是按值回傳的結構，所以在取得
+    /// 這個切片之後複製或搬移 Judge 會讓它懸空——和 chart.Chart 的 arena
+    /// 同一類陷阱。就地使用，不要存起來跨帧。
     pub fn judgements(self: *const Judge) []const Judgement {
         return self.event_buf[0..self.event_count];
     }
@@ -2435,7 +2545,14 @@ pub const Judge = struct {
     }
 
     fn emit(self: *Judge, j: Judgement) void {
-        if (self.event_count >= max_events_per_frame) return;
+        if (self.event_count >= max_events_per_frame) {
+            // 不要靜默丟掉。判定是計分的輸入，丟掉會讓達成率的分母
+            // 永遠達不到，而且沒有任何訊號——那比崩潰更難查。
+            // chart 的 tick 間距下限讓這件事在正常譜面上到不了，
+            // 這個計數器是給「下限被改鬆」或「掉帧超過一秒」的情況。
+            self.dropped_events += 1;
+            return;
+        }
         self.event_buf[self.event_count] = j;
         self.event_count += 1;
     }
@@ -2500,6 +2617,12 @@ pub const Judge = struct {
             const g = gradeFor(@abs(dt)) orelse continue;
 
             // 游標在錯的地方按，不該把 note 吃掉（spec §6）。
+            //
+            // 這裡是 return 而不是 continue，而那只在 chart 保證「任兩個 note
+            // 的可判定區間不重疊」的前提下才正確——有了那個保證，任一瞬間
+            // 最多只有一個 note 的頭判定窗是活的，所以不需要往後找。
+            // 若哪天那個不變量放寬（例如允許剛好相接），這裡要改成 continue，
+            // 否則對第一個 note 按錯位置會連帶拒絕第二個。
             if (!zoneMatchesHead(n, zone)) return;
 
             self.emit(.{
@@ -2530,8 +2653,13 @@ pub const Judge = struct {
         }
     }
 
-    /// 評定所有「時刻已過但尚未評定」的覆蓋 tick。
-    /// 以當帧的覆蓋狀態評定；240 FPS 下取樣誤差 ≤ 4ms。
+    /// 評定所有「時刻已過但尚未評定」的覆蓋 tick。**是所有，不是只有最後
+    /// 一個**——掉一帧不該讓玩家損失那段期間的 tick。這條有專門的測試。
+    ///
+    /// 以當帧的覆蓋狀態評定。正常情況下（tick 間距遠大於帧間隔）取樣誤差
+    /// 就是一個帧的長度，240 FPS 下 ≤ 4ms。例外：當 tick 間距小於 good_ms
+    /// 時，落在頭判定窗內的那幾個 tick 要等頭判定結束才會被評定，用的是
+    /// 那一帧的覆蓋狀態而不是它們自己時刻的狀態。
     fn advanceTicks(
         self: *Judge,
         i: usize,
@@ -3582,6 +3710,9 @@ pub const Play = struct {
     clock: core.clock.SongClock,
     effects: EffectPool,
     last_frame: input.Frame,
+    /// 上一帧的譜面時間。用來偵測時鐘向後跳——judge 的契約要求 now_ms
+    /// 單調不減，而 SongClock 在錨點誤差過大時會硬重置，那可以是向後的。
+    last_now_ms: f64,
 
     /// 就地初始化。judge 會持有 &self.chart，所以之後不得搬移 self。
     pub fn init(
@@ -3612,6 +3743,7 @@ pub const Play = struct {
         self.clock = .{ .anchorFn = anchorMs, .monoFn = monoMs };
         self.effects = .{};
         self.last_frame = .{ .zone = .outside, .key_held = false, .presses = 0 };
+        self.last_now_ms = -std.math.inf(f64);
 
         active_music = self.music;
         self.clock.restart();
@@ -3640,6 +3772,18 @@ pub const Play = struct {
         self.last_frame = frame;
         const now = self.chartTimeMs();
 
+        // judge 要求 now_ms 單調不減（見 judge.zig 的模組註解）。SongClock 在
+        // 錨點誤差超過 clock_reset_ms 時會硬重置，而那可以是向後的——音訊停住
+        // （裝置暫停、長時間卡頓）後恢復就會這樣。
+        //
+        // 繼續餵的後果不是崩潰而是靜默錯誤：judge 的狀態只往前走，所以那段
+        // 被重播的區間裡每次按鍵都會被丟棄，既不計分也不算 MISS。與其讓玩家
+        // 打一段不算分的歌，不如當場結束這一局，把當下的成績送去結算。
+        if (now + c.clock_reset_ms < self.last_now_ms) {
+            return .{ .to_result = self.scorer.summary() };
+        }
+        self.last_now_ms = now;
+
         // Task 7 文件化的順序：beginFrame → update → keyDown → 消費
         self.judge.beginFrame();
         self.judge.update(now, frame.zone, frame.key_held);
@@ -3653,6 +3797,12 @@ pub const Play = struct {
         for (self.judge.judgements()) |jd| {
             self.scorer.apply(jd);
             self.effects.spawn(effectPoint(l, self.chart.notes[jd.note_index], frame.zone), jd.grade);
+        }
+
+        // 判定緩衝區溢出代表計分的輸入已經不完整（chart 的 tick 間距下限
+        // 讓正常譜面到不了這裡）。不要默默繼續——結束這一局。
+        if (self.judge.dropped_events > 0) {
+            return .{ .to_result = self.scorer.summary() };
         }
 
         self.effects.advance(@as(f64, rl.getFrameTime()) * 1000.0);
