@@ -627,6 +627,13 @@ test "不變量: note 的 time 超出範圍會報錯而不是讓加法溢位 pan
     try std.testing.expectError(error.TimeOutOfRange, parse(std.testing.allocator, j, 0));
 }
 
+test "不變量: time_ms 超出下界" {
+    // 這條界限原本有強制但無測試——寫成單邊檢查會通過全部測試，
+    // 而 minInt 會在 checkNoOverlap 的 time_ms - good_ms 下溢時 panic。
+    const j = jsonWithNotes("{\"t\":-2147483648,\"type\":\"center\"}");
+    try std.testing.expectError(error.TimeOutOfRange, parse(std.testing.allocator, j, 0));
+}
+
 test "parse 把字串複製進 arena，不會指向輸入的 json_bytes" {
     // 沒有轉義字元的字串（例如 "Example"）在 std.json 預設的 .alloc_if_needed
     // 下會是指向 json_bytes 的切片，而不是 arena 複本。loadFromDir 讀完檔就會

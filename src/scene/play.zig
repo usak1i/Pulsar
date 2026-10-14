@@ -12,7 +12,7 @@ var active_music: ?rl.Music = null;
 var last_audio_ms: f64 = 0;
 
 fn anchorMs() f64 {
-    const music = active_music orelse unreachable;
+    const music = active_music orelse return last_audio_ms;
     // raylib 自然播畢會歸零。保留錨點，讓單調時鐘走完譜面尾段。
     if (rl.isMusicStreamPlaying(music)) {
         last_audio_ms = @as(f64, rl.getMusicTimePlayed(music)) * 1000;

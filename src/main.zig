@@ -25,21 +25,30 @@ pub fn parseFpsArg(arg: []const u8) FpsResult {
     return .invalid;
 }
 
-fn resolveFps(args: std.process.Args) error{InvalidFps}!i32 {
-    var it = args.iterate();
-    _ = it.next(); // argv[0]
-    while (it.next()) |arg| {
+/// 掃完全部參數：任何非法值都拒絕，多個合法值時最後一個勝出。
+fn scanFps(args: []const []const u8) error{InvalidFps}!i32 {
+    var fps: i32 = c.default_fps;
+    for (args) |arg| {
         switch (parseFpsArg(arg)) {
             .not_fps_arg => {},
             .invalid => return error.InvalidFps,
-            .fps => |v| return v,
+            .fps => |v| fps = v,
         }
     }
-    return c.default_fps;
+    return fps;
+}
+
+fn resolveFps(gpa: std.mem.Allocator, args: std.process.Args) error{ InvalidFps, OutOfMemory }!i32 {
+    var list: std.ArrayList([]const u8) = .empty;
+    defer list.deinit(gpa);
+    var it = args.iterate();
+    _ = it.next(); // argv[0]
+    while (it.next()) |arg| try list.append(gpa, arg);
+    return scanFps(list.items);
 }
 
 pub fn main(init: std.process.Init) !void {
-    const fps = resolveFps(init.minimal.args) catch {
+    const fps = resolveFps(init.gpa, init.minimal.args) catch {
         std.debug.print("用法: rhythm-game [--fps=60|120|240]\n", .{});
         return error.InvalidFps;
     };
@@ -84,13 +93,15 @@ pub fn main(init: std.process.Init) !void {
                 // ref 是按值複本；釋放 select 後仍然有效。
                 leaveScene(&active, &select, &play);
                 current_song = ref;
-                play.init(init.gpa, init.io, current_song.path(), current_song.difficulty) catch |err| {
+                if (play.init(init.gpa, init.io, current_song.path(), current_song.difficulty)) {
+                    active = .play;
+                } else |err| {
+                    // 不要 continue：跳過 endDrawing 會讓 raylib 不輪詢輸入，
+                    // Enter 的邊緣狀態殘留下來，下一圈會自己再啟動一次。
                     try select.init(init.gpa, init.io);
                     active = .select;
                     select.notice = @errorName(err);
-                    continue;
-                };
-                active = .play;
+                }
             },
             .to_result => |summary| {
                 leaveScene(&active, &select, &play);
@@ -159,4 +170,24 @@ test "Transition 能帶著結算資料" {
         .total = 440,
     } };
     try std.testing.expectApproxEqAbs(@as(f64, 98.32), t.to_result.achievement, 1e-9);
+}
+
+test "scanFps 無參數回傳預設值" {
+    try std.testing.expectEqual(@as(i32, c.default_fps), try scanFps(&.{}));
+}
+
+test "scanFps 略過非 fps 參數" {
+    try std.testing.expectEqual(@as(i32, 120), try scanFps(&.{ "--help", "--fps=120" }));
+}
+
+test "scanFps 拒絕非法值" {
+    try std.testing.expectError(error.InvalidFps, scanFps(&.{"--fps=99"}));
+}
+
+test "scanFps 不會因為前面有合法值就放過後面的非法值" {
+    try std.testing.expectError(error.InvalidFps, scanFps(&.{ "--fps=60", "--fps=99" }));
+}
+
+test "scanFps 多個合法值時最後一個勝出" {
+    try std.testing.expectEqual(@as(i32, 240), try scanFps(&.{ "--fps=60", "--fps=240" }));
 }

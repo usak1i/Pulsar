@@ -530,8 +530,9 @@ pub const Transition = union(enum) {
 - note 從圓心往外飛，視覺半徑 = `f(到判定時刻的剩餘時間)`，在
   `r_judge = 0.80` 的判定圈上命中。可見時間為常數 `approach_ms = 700`
   （即玩家感知的「note 速度」）。
-- `render` 為唯讀快照的純函式：`fn draw(state: *const PlayState) void`。
-  不改狀態、不呼叫判定、不碰時鐘。
+- `render` 是一組 per-primitive 函式（`drawStage` / `drawArc` / `drawCursor` /
+  `drawNote` / `drawEffects` / `drawHud` …），由場景逐一呼叫並傳入唯讀資料；
+  沒有 `PlayState`。不改狀態、不呼叫判定、不碰時鐘。
 - 命中特效（擴散圓 + alpha 衰減）用固定大小的 pool。
   **遊玩過程中不配置任何記憶體。**
 - **必須隱藏系統游標並自行把當前 cell 高亮在環上。**
