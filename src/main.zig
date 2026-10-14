@@ -26,9 +26,10 @@ pub fn parseFpsArg(arg: []const u8) FpsResult {
 }
 
 /// 掃完全部參數：任何非法值都拒絕，多個合法值時最後一個勝出。
-fn scanFps(args: []const []const u8) error{InvalidFps}!i32 {
+/// `it` 只需要 `next()`，所以 std.process.Args.Iterator 與測試用的切片迭代器都能餵。
+fn scanFps(it: anytype) error{InvalidFps}!i32 {
     var fps: i32 = c.default_fps;
-    for (args) |arg| {
+    while (it.next()) |arg| {
         switch (parseFpsArg(arg)) {
             .not_fps_arg => {},
             .invalid => return error.InvalidFps,
@@ -38,17 +39,14 @@ fn scanFps(args: []const []const u8) error{InvalidFps}!i32 {
     return fps;
 }
 
-fn resolveFps(gpa: std.mem.Allocator, args: std.process.Args) error{ InvalidFps, OutOfMemory }!i32 {
-    var list: std.ArrayList([]const u8) = .empty;
-    defer list.deinit(gpa);
+fn resolveFps(args: std.process.Args) error{InvalidFps}!i32 {
     var it = args.iterate();
     _ = it.next(); // argv[0]
-    while (it.next()) |arg| try list.append(gpa, arg);
-    return scanFps(list.items);
+    return scanFps(&it);
 }
 
 pub fn main(init: std.process.Init) !void {
-    const fps = resolveFps(init.gpa, init.minimal.args) catch {
+    const fps = resolveFps(init.minimal.args) catch {
         std.debug.print("用法: rhythm-game [--fps=60|120|240]\n", .{});
         return error.InvalidFps;
     };
@@ -172,24 +170,40 @@ test "Transition 能帶著結算資料" {
     try std.testing.expectApproxEqAbs(@as(f64, 98.32), t.to_result.achievement, 1e-9);
 }
 
+const SliceIter = struct {
+    items: []const []const u8,
+    i: usize = 0,
+
+    fn next(self: *SliceIter) ?[]const u8 {
+        if (self.i >= self.items.len) return null;
+        defer self.i += 1;
+        return self.items[self.i];
+    }
+};
+
+fn scanSlice(items: []const []const u8) error{InvalidFps}!i32 {
+    var it: SliceIter = .{ .items = items };
+    return scanFps(&it);
+}
+
 test "scanFps 無參數回傳預設值" {
-    try std.testing.expectEqual(@as(i32, c.default_fps), try scanFps(&.{}));
+    try std.testing.expectEqual(@as(i32, c.default_fps), try scanSlice(&.{}));
 }
 
 test "scanFps 略過非 fps 參數" {
-    try std.testing.expectEqual(@as(i32, 120), try scanFps(&.{ "--help", "--fps=120" }));
+    try std.testing.expectEqual(@as(i32, 120), try scanSlice(&.{ "--help", "--fps=120" }));
 }
 
 test "scanFps 拒絕非法值" {
-    try std.testing.expectError(error.InvalidFps, scanFps(&.{"--fps=99"}));
+    try std.testing.expectError(error.InvalidFps, scanSlice(&.{"--fps=99"}));
 }
 
 test "scanFps 不會因為前面有合法值就放過後面的非法值" {
-    try std.testing.expectError(error.InvalidFps, scanFps(&.{ "--fps=60", "--fps=99" }));
+    try std.testing.expectError(error.InvalidFps, scanSlice(&.{ "--fps=60", "--fps=99" }));
 }
 
 test "scanFps 多個合法值時最後一個勝出" {
-    try std.testing.expectEqual(@as(i32, 240), try scanFps(&.{ "--fps=60", "--fps=240" }));
+    try std.testing.expectEqual(@as(i32, 240), try scanSlice(&.{ "--fps=60", "--fps=240" }));
 }
 
 // Zig 只收集被分析到的檔案的 test；play 的 step 測試要靠這行才會跑。

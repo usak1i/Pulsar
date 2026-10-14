@@ -89,8 +89,8 @@ pub fn drawHud(combo: u32, achievement: f64) void {
     var combo_buf: [32]u8 = undefined;
     var score_buf: [64]u8 = undefined;
     // 固定 buffer 不需配置記憶體；萬一放不下就畫退路字串，而不是 UB。
-    const combo_text = std.fmt.bufPrintZ(&combo_buf, "COMBO {d}", .{combo}) catch "…";
-    const score_text = std.fmt.bufPrintZ(&score_buf, "{d:.2}%", .{achievement}) catch "…";
+    const combo_text = std.fmt.bufPrintZ(&combo_buf, "COMBO {d}", .{combo}) catch "?";
+    const score_text = std.fmt.bufPrintZ(&score_buf, "{d:.2}%", .{achievement}) catch "?";
     rl.drawText(combo_text, 24, 24, 32, .{ .r = 255, .g = 240, .b = 180, .a = 255 });
     rl.drawText(score_text, 24, 64, 24, .ray_white);
 }
@@ -117,7 +117,7 @@ pub fn drawSelect(rows: []const SongRow, selected: usize, difficulty: usize, not
     const first = selected / c.select_visible_songs * c.select_visible_songs;
     const end = @min(rows.len, first + c.select_visible_songs);
     var page_buf: [80]u8 = undefined;
-    const page = std.fmt.bufPrintZ(&page_buf, "Song {d}/{d}", .{ selected + 1, rows.len }) catch "…";
+    const page = std.fmt.bufPrintZ(&page_buf, "Song {d}/{d}", .{ selected + 1, rows.len }) catch "?";
     rl.drawText(page, 40, 72, 18, .gray);
     for (rows[first..end], first..) |row, i| {
         const y: i32 = 110 + @as(i32, @intCast(i - first)) * 28;
@@ -146,13 +146,13 @@ pub fn drawResult(summary: core.scoring.Summary) void {
     var counts_buf: [160]u8 = undefined;
     var combo_buf: [96]u8 = undefined;
     rl.drawText("RESULT", 40, 32, 28, .gray);
-    const score = std.fmt.bufPrintZ(&score_buf, "{d:.2}%", .{summary.achievement}) catch "…";
+    const score = std.fmt.bufPrintZ(&score_buf, "{d:.2}%", .{summary.achievement}) catch "?";
     rl.drawText(score, 40, 90, 72, .yellow);
     const counts = std.fmt.bufPrintZ(&counts_buf, "PERFECT {d}   GREAT {d}   GOOD {d}   MISS {d}", .{
         summary.perfect, summary.great, summary.good, summary.miss,
-    }) catch "…";
+    }) catch "?";
     rl.drawText(counts, 40, 200, 22, .ray_white);
-    const combo = std.fmt.bufPrintZ(&combo_buf, "MAX COMBO {d} / {d:.0}", .{ summary.max_combo, summary.total }) catch "…";
+    const combo = std.fmt.bufPrintZ(&combo_buf, "MAX COMBO {d} / {d:.0}", .{ summary.max_combo, summary.total }) catch "?";
     rl.drawText(combo, 40, 240, 22, .ray_white);
     rl.drawText("ENTER retry   ESC song select", 40, 320, 20, .gray);
 }
