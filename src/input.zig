@@ -16,6 +16,8 @@ pub const Frame = struct {
     key_held: bool,
     /// 本帧有幾個觸發鍵從放開變成按下。
     presses: u8,
+    /// 場景決策要用的按鍵一律經過這裡，讓場景的 step 不必直接碰 raylib。
+    escape_pressed: bool = false,
 };
 
 pub fn poll() Frame {
@@ -34,5 +36,6 @@ pub fn poll() Frame {
         .zone = geom.zoneAt(m.x, m.y, w, h),
         .key_held = held,
         .presses = presses,
+        .escape_pressed = rl.isKeyPressed(.escape),
     };
 }

@@ -130,6 +130,26 @@ pub const Judge = struct {
         return self.first_active >= self.chart.notes.len;
     }
 
+    /// 尚未判定完成的最早一個 note 的索引。場景用它決定從哪裡開始掃描繪圖。
+    pub fn firstActive(self: *const Judge) usize {
+        return self.first_active;
+    }
+
+    /// 這個 note 是否已經判定完畢（含 MISS）。
+    pub fn isDone(self: *const Judge, note_index: usize) bool {
+        return self.states[note_index].status == .done;
+    }
+
+    /// slider 已經評定過的最後一個 tick；頭判定尚未完成（pending）時回傳 null。
+    /// 場景用它畫出「現在應該追蹤到哪裡」，避免從時間重推而與判定不一致。
+    /// 非 slider 一律 null。
+    pub fn currentTick(self: *const Judge, note_index: usize) ?u32 {
+        if (self.chart.notes[note_index].kind != .slider) return null;
+        const st = self.states[note_index];
+        if (st.status == .pending) return null;
+        return st.next_tick - 1;
+    }
+
     fn emit(self: *Judge, j: Judgement) void {
         if (self.event_count >= max_events_per_frame) {
             // 不要靜默丟掉。判定是計分的輸入，丟掉會讓達成率的分母

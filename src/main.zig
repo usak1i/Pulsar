@@ -191,3 +191,8 @@ test "scanFps 不會因為前面有合法值就放過後面的非法值" {
 test "scanFps 多個合法值時最後一個勝出" {
     try std.testing.expectEqual(@as(i32, 240), try scanFps(&.{ "--fps=60", "--fps=240" }));
 }
+
+// Zig 只收集被分析到的檔案的 test；play 的 step 測試要靠這行才會跑。
+test {
+    _ = play_scene;
+}

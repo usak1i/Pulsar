@@ -67,15 +67,17 @@ pub fn drawNote(l: layout.Layout, n: core.chart.Note, chart_time_ms: f64, tracki
 
 pub const Effect = struct {
     active: bool = false,
-    at: layout.Point = .{ .x = 0, .y = 0 },
+    /// 存 arc 而非座標：位置在畫的時候才解析，視窗縮放時特效才會跟著動。
+    /// null = center note（圓心）。
+    arc: ?geom.Arc = null,
     age_ms: f64 = 0,
     color: rl.Color = .white,
 };
 
-pub fn drawEffects(effects: []const Effect) void {
+pub fn drawEffects(l: layout.Layout, effects: []const Effect) void {
     for (effects) |e| {
         if (!e.active) continue;
-        const geometry = layout.effectGeometry(e.at, e.age_ms);
+        const geometry = layout.effectGeometry(layout.effectPoint(l, e.arc), e.age_ms);
         var color = e.color;
         color.a = geometry.alpha;
         drawCircle(geometry.circle, color);
