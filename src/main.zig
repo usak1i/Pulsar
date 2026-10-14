@@ -1,6 +1,9 @@
 const std = @import("std");
 const rl = @import("raylib");
 const core = @import("rhythm_game");
+const select_scene = @import("scene/select.zig");
+const result_scene = @import("scene/result.zig");
+const play_scene = @import("scene/play.zig");
 const transition = @import("transition.zig");
 
 const c = core.constants;
@@ -44,6 +47,8 @@ pub fn main(init: std.process.Init) !void {
     rl.initWindow(1280, 720, "rhythm game");
     defer rl.closeWindow();
     rl.setTargetFPS(fps);
+    // Esc 必須先經過 play.update 回傳轉換意圖，而非 windowShouldClose 攔截。
+    rl.setExitKey(.null);
 
     rl.initAudioDevice();
     defer rl.closeAudioDevice();
@@ -52,12 +57,75 @@ pub fn main(init: std.process.Init) !void {
     // 高亮在環上。這不是美化，是這個輸入方案可玩的前提（spec §7）。
     rl.hideCursor();
 
+    var active: Scene = .none;
+    var select: select_scene.Select = undefined;
+    var play: play_scene.Play = undefined;
+    var result: result_scene.Result = undefined;
+    var current_song: transition.SongRef = .{};
+    defer leaveScene(&active, &select, &play);
+    try select.init(init.gpa, init.io);
+    active = .select;
+
     while (!rl.windowShouldClose()) {
+        var notice: ?[:0]const u8 = null;
+        const intent: transition.Transition = switch (active) {
+            .select => select.update(),
+            .play => play.update() catch |err| blk: {
+                notice = @errorName(err);
+                break :blk .to_select;
+            },
+            .result => result.update(),
+            .none => unreachable,
+        };
+        switch (intent) {
+            .stay => {},
+            .quit => break,
+            .to_play => |ref| {
+                // ref 是按值複本；釋放 select 後仍然有效。
+                leaveScene(&active, &select, &play);
+                current_song = ref;
+                play.init(init.gpa, init.io, current_song.path(), current_song.difficulty) catch |err| {
+                    try select.init(init.gpa, init.io);
+                    active = .select;
+                    select.notice = @errorName(err);
+                    continue;
+                };
+                active = .play;
+            },
+            .to_result => |summary| {
+                leaveScene(&active, &select, &play);
+                result = result_scene.Result.init(summary, current_song);
+                active = .result;
+            },
+            .to_select => {
+                leaveScene(&active, &select, &play);
+                try select.init(init.gpa, init.io);
+                active = .select;
+                if (notice) |message| select.notice = message;
+            },
+        }
         rl.beginDrawing();
         defer rl.endDrawing();
-        rl.clearBackground(.black);
-        rl.drawText("scaffold — Task 10 會畫上環", 20, 20, 20, .ray_white);
+        rl.clearBackground(.{ .r = 12, .g = 14, .b = 20, .a = 255 });
+        switch (active) {
+            .select => select.draw(),
+            .play => play.draw(),
+            .result => result.draw(),
+            .none => unreachable,
+        }
     }
+}
+
+const Scene = enum { none, select, play, result };
+
+fn leaveScene(active: *Scene, select: *select_scene.Select, play: *play_scene.Play) void {
+    switch (active.*) {
+        .select => select.deinit(),
+        .play => play.deinit(),
+        .result, .none => {},
+    }
+    // 目標初始化若失敗，defer 不能再清理來源或未初始化的目標。
+    active.* = .none;
 }
 
 test "parseFpsArg 接受三個合法值" {

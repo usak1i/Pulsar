@@ -10,12 +10,37 @@
 
 **Spec:** `docs/superpowers/specs/2026-10-04-rhythm-game-core-design.md`
 
+## 目前進度（2026-10-11）
+
+以下以程式碼與本次驗證為依據。Task 層級清單是進度來源；Task 1–9 下方的
+原始步驟清單與程式片段保留為原始實作配方，不代表尚未開始，也不追認每個歷史
+「先紅後綠」步驟已被重新驗證。配方與現行程式不同時，契約以 spec 為準。
+
+- [x] Task 1–4：常數、geom、chart 解析／驗證／序列化與檔案 I/O 已實作。
+- [x] Task 5：節拍器譜面與 WAV 產生腳本已實作；本機 audio.wav 存在（音檔不入版控）。
+- [x] Task 6–8：SongClock、judge、scoring 與離線整首歌測試已實作。
+- [x] Task 9：`--fps`、視窗／音訊初始化、Transition 與 exe 測試已實作。
+- [ ] Task 9 人工驗收：開窗、游標隱藏與不同幀率執行，PENDING-HUMAN。
+- [x] Task 10：layout／input／render 與 main 接線已實作；人工畫面驗收仍為 PENDING-HUMAN。
+- [x] Task 11：play、音訊接線、時間倒退／事件溢出處理、HUD 與特效已實作；實機音訊同步為 PENDING-HUMAN。
+- [x] Task 11 整合驗證：注入 SongClock → 扣除 offset_ms → judge → scoring。
+- [x] Task 12：選歌／結算與三場景循環已實作，實機驗收為 PENDING-HUMAN。
+- [ ] Task 13：錄製模式尚未實作。
+
+本次基線：`zig build test --summary all` **128/128 通過**（核心 122、exe 6）；
+`zig build --summary all` 通過。未執行視窗；畫面、音訊對拍、操作手感與場景
+循環須在可開窗的機器驗收。ReleaseFast 未於本次 review 重跑。
+
+Task 8 的固定步長測試保留；Task 11 新增獨立音訊時間安排輸入、注入 SongClock
+並扣除 offset_ms 的整合測試，涵蓋全中、部分得分與全 MISS。raylib 呼叫與場景
+接線依規範仍由人工驗收。
+
 ## Global Constraints
 
 這些是 spec 的全域要求，每個 task 的需求都隱含包含本節。數值一律照抄 spec，不自行調整。
 
 - **Zig 0.16.0**。`std.fs.Dir` 已搬到 `std.Io.Dir`；檔案 I/O 需傳 `io: std.Io`。`std.ArrayList` 是 unmanaged（`append(gpa, item)`）。`std.BoundedArray` 已移除，改用固定陣列 + len。`main` 的簽章是 `fn main(init: std.process.Init) !void`。
-- **純核心不得 `@import("raylib")`**。`constants` `geom` `chart` `clock` `judge` `scoring` 屬 `rhythm_game` 模組，`build.zig` 沒把 raylib 加進該模組，寫了會編譯失敗。不要為了繞過它把純邏輯搬去 exe 側。
+- **純核心不得使用 raylib**。`constants` `geom` `chart` `clock` `judge` `scoring` 與 `layout` 屬 `rhythm_game` 模組；`build.zig` 沒把 raylib 加進該模組，被分析的程式碼實際使用 raylib 才會編譯失敗，未引用的 import 不會。不要為了繞過它把純邏輯搬去 exe 側。
 - **環固定 64 格**，`Cell = u6`，值域恰好等於合法值域。程式中不得出現 cell 的範圍檢查，環狀繞行用 `@mod` 或 `+%`。
 - **譜面是單線程的**：任兩個 note 的可判定區間不得重疊。載入時驗證，違反回傳 error。
 - **所有不變量違反皆為 error，不做 fallback、不做修補。**
@@ -47,6 +72,7 @@
 | `src/root.zig` | 模組 root：匯出純核心、聚集其測試 |
 | `src/constants.zig` | spec §11 的全部常數，唯一的一處 |
 | `src/geom.zig` | Cell ↔ 角度、環狀位移與 arc 包含判定、`zoneAt` |
+| `src/layout.zig` | 座標數學與閉環測試 |
 | `src/chart.zig` | 資料模型、`parse`（純）、`serialize`、`loadFromDir`、全部不變量驗證 |
 | `src/clock.zig` | `SongClock`：錨點 + 插值 + 平滑 |
 | `src/judge.zig` | 判定狀態機：滑動窗口、tap/center、slider tick |
@@ -58,7 +84,7 @@
 |---|---|
 | `src/main.zig` | `--fps` 解析、視窗、場景切換、資源生命週期 |
 | `src/input.zig` | raylib 滑鼠/鍵盤 → `geom.CursorZone` 與按鍵事件 |
-| `src/render.zig` | 全部繪圖：`Layout`、環、判定圈、游標、note、特效 |
+| `src/render.zig` | 使用 core.layout 繪製環、判定圈、游標、note、特效 |
 | `src/recorder.zig` | 錄製模式 |
 | `src/scene/select.zig` | 掃 `charts/`、列出歌曲與難度 |
 | `src/scene/play.zig` | 接上音訊、時鐘、判定、計分、繪圖 |
@@ -97,7 +123,7 @@
   - `constants.hold_threshold_ms: f64`
   - `root.constants`（模組匯出）
 
-- [ ] **Step 1: 寫失敗的測試**
+- **原始步驟 Step 1: 寫失敗的測試**
 
 Create `src/constants.zig` 只放測試，實作留空（下一步才補），讓它先編譯失敗：
 
@@ -121,14 +147,14 @@ test "半徑分區依序遞增且小於 1" {
 }
 ```
 
-- [ ] **Step 2: 跑測試確認失敗**
+- **原始步驟 Step 2: 跑測試確認失敗**
 
 Run: `zig build test`
 Expected: FAIL — `error: use of undeclared identifier 'ring_cells'`
 
 （若反而出現「沒有任何測試被執行」而非編譯錯誤，表示 `src/root.zig` 還沒 import `constants.zig`，Step 4 會修。）
 
-- [ ] **Step 3: 補上常數實作**
+- **原始步驟 Step 3: 補上常數實作**
 
 在 `src/constants.zig` 的測試之前插入：
 
@@ -202,7 +228,7 @@ comptime {
 }
 ```
 
-- [ ] **Step 4: 重寫 root.zig**
+- **原始步驟 Step 4: 重寫 root.zig**
 
 整檔取代 `src/root.zig`：
 
@@ -222,12 +248,12 @@ test {
 }
 ```
 
-- [ ] **Step 5: 跑測試確認通過**
+- **原始步驟 Step 5: 跑測試確認通過**
 
 Run: `zig build test`
 Expected: PASS
 
-- [ ] **Step 6: 確認純核心真的沒連結 raylib**
+- **原始步驟 Step 6: 確認純核心真的沒連結 raylib**
 
 **重要：Zig 不分析沒被引用的宣告**，所以光是加一行 `const rl = @import("raylib");`
 **不會**報錯——那個 import 從頭到尾沒被解析。要讓界線現形，必須在一個**會被分析**
@@ -251,7 +277,7 @@ Expected: FAIL — `error: no module named 'raylib' available within module 'roo
 
 確認過後把整個 test 區塊刪掉，再跑一次 `zig build test` 確認回到 PASS。
 
-- [ ] **Step 7: Commit**
+- **原始步驟 Step 7: Commit**
 
 ```bash
 git add src/constants.zig src/root.zig
@@ -287,7 +313,7 @@ root.zig 改為 rhythm_game 模組的 root；已驗證該模組無法 import ray
   - `geom.angleOf(cell: Cell) f32` — cell 中心的弧度，0 在正上方，順時針遞增
   - `geom.zoneAt(x: f32, y: f32, screen_w: f32, screen_h: f32) CursorZone`
 
-- [ ] **Step 1: 寫失敗的測試**
+- **原始步驟 Step 1: 寫失敗的測試**
 
 Create `src/geom.zig`，只放測試：
 
@@ -402,12 +428,12 @@ test "zoneAt 回傳的 cell 與方向一致" {
 }
 ```
 
-- [ ] **Step 2: 跑測試確認失敗**
+- **原始步驟 Step 2: 跑測試確認失敗**
 
 Run: `zig build test`
 Expected: FAIL — `error: use of undeclared identifier 'wrapAdd'`
 
-- [ ] **Step 3: 寫實作**
+- **原始步驟 Step 3: 寫實作**
 
 在 `src/geom.zig` 的測試之前插入：
 
@@ -479,16 +505,16 @@ pub fn zoneAt(x: f32, y: f32, screen_w: f32, screen_h: f32) CursorZone {
 }
 ```
 
-- [ ] **Step 4: 加進模組 root**
+- **原始步驟 Step 4: 加進模組 root**
 
 Modify `src/root.zig`：在 `constants` 那行之後加 `pub const geom = @import("geom.zig");`，並在 `test` 區塊加 `_ = geom;`。
 
-- [ ] **Step 5: 跑測試確認通過**
+- **原始步驟 Step 5: 跑測試確認通過**
 
 Run: `zig build test`
 Expected: PASS（全部 13 個 geom 測試）
 
-- [ ] **Step 6: Commit**
+- **原始步驟 Step 6: Commit**
 
 ```bash
 git add src/geom.zig src/root.zig
@@ -503,7 +529,7 @@ zoneAt 的 ring 區無外緣上限，見 spec §2 的理由。"
 
 ### Task 3: chart — 資料模型與 parse
 
-譜面的型別、JSON 解析、以及 spec §4 全部六條不變量的驗證。
+譜面的型別、JSON 解析、以及 spec §4 全部八條不變量的驗證。
 
 **檔案 I/O 與解析刻意分離**：`parse` 是純函式（只吃位元組），`loadFromDir` 是薄包裝。驗證邏輯因此完全可純測，不需要 temp 目錄。
 
@@ -531,7 +557,7 @@ zoneAt 的 ring 區無外緣上限，見 spec §2 的理由。"
   - `chart.LoadError`
   - `chart.loadFromDir(gpa: Allocator, io: std.Io, dir: std.Io.Dir, difficulty: usize) LoadError!Chart`
 
-- [ ] **Step 1: 寫失敗的測試**
+- **原始步驟 Step 1: 寫失敗的測試**
 
 Create `src/chart.zig`，只放測試：
 
@@ -789,12 +815,12 @@ test "parse 壞掉的 JSON" {
 }
 ```
 
-- [ ] **Step 2: 跑測試確認失敗**
+- **原始步驟 Step 2: 跑測試確認失敗**
 
 Run: `zig build test`
 Expected: FAIL — `error: use of undeclared identifier 'parse'`
 
-- [ ] **Step 3: 寫型別**
+- **原始步驟 Step 3: 寫型別**
 
 在 `src/chart.zig` 的測試之前插入：
 
@@ -883,7 +909,7 @@ pub const Chart = struct {
 };
 ```
 
-- [ ] **Step 4: 寫 parse**
+- **原始步驟 Step 4: 寫 parse**
 
 接在型別之後：
 
@@ -1061,25 +1087,25 @@ pub fn loadFromDir(
 }
 ```
 
-- [ ] **Step 5: 加進模組 root**
+- **原始步驟 Step 5: 加進模組 root**
 
 Modify `src/root.zig`：確認已有 `pub const chart = @import("chart.zig");` 與 `test` 區塊裡的 `_ = chart;`（Step 1 應已完成）。若當初漏了，現在補上。
 
-- [ ] **Step 6: 跑測試確認通過**
+- **原始步驟 Step 6: 跑測試確認通過**
 
 Run: `zig build test`
 Expected: PASS（全部 22 個 chart 測試）
 
 若出現記憶體洩漏報告，檢查 `errdefer arena.deinit()` 是否在每條 error 路徑上都生效，以及測試是否都有 `defer ch.deinit()`。
 
-- [ ] **Step 7: Commit**
+- **原始步驟 Step 7: Commit**
 
 ```bash
 git add src/chart.zig src/root.zig
 git commit -m "feat: add chart data model and parser
 
 parse 是純函式（只吃位元組），loadFromDir 是薄包裝——驗證邏輯因此
-不需要 temp 目錄就能全測。spec §4 的六條不變量各有違反案例測試。
+不需要 temp 目錄就能全測。spec §4 的八條不變量各有違反案例測試。
 
 單線程不變量用「到目前為止的最大結束時刻」比對。在目前的區間定義下它與
 相鄰比較等價，但不依賴那個推論——區間定義一改，相鄰比較就會失效。"
@@ -1101,7 +1127,7 @@ parse 是純函式（只吃位元組），loadFromDir 是薄包裝——驗證�
   - `chart.SaveError`
   - `chart.saveToDir(gpa: Allocator, io: std.Io, dir: std.Io.Dir, ch: *const Chart) SaveError!void`
 
-- [ ] **Step 1: 寫失敗的測試**
+- **原始步驟 Step 1: 寫失敗的測試**
 
 Append 到 `src/chart.zig` 的測試區：
 
@@ -1186,12 +1212,12 @@ test "serialize 保留負的 sweep（逆時針）" {
 }
 ```
 
-- [ ] **Step 2: 跑測試確認失敗**
+- **原始步驟 Step 2: 跑測試確認失敗**
 
 Run: `zig build test`
 Expected: FAIL — `error: use of undeclared identifier 'serialize'`
 
-- [ ] **Step 3: 寫實作**
+- **原始步驟 Step 3: 寫實作**
 
 接在 `loadFromDir` 之後：
 
@@ -1263,7 +1289,7 @@ pub fn saveToDir(
 }
 ```
 
-- [ ] **Step 4: 跑測試確認通過**
+- **原始步驟 Step 4: 跑測試確認通過**
 
 Run: `zig build test`
 Expected: PASS（25 個 chart 測試）
@@ -1272,7 +1298,7 @@ Expected: PASS（25 個 chart 測試）
 `/opt/homebrew/Cellar/zig/0.16.0/lib/zig/std/Io/Dir.zig` 裡的 `WriteFileOptions`
 並照實際欄位名修正（`sub_path`、`data`）。
 
-- [ ] **Step 5: Commit**
+- **原始步驟 Step 5: Commit**
 
 ```bash
 git add src/chart.zig
@@ -1302,7 +1328,7 @@ serialize 以 emit_null_optional_fields=false 讓 center note 不輸出空的
 - Consumes: Task 3 的 `chart.parse`（驗證這張譜面合法）
 - Produces: `charts/01-metronome/`，可被 Task 12 的 play 場景直接載入
 
-- [ ] **Step 1: 寫產生 WAV 的腳本**
+- **原始步驟 Step 1: 寫產生 WAV 的腳本**
 
 Create `tools/make_metronome.py`：
 
@@ -1355,12 +1381,12 @@ with wave.open(OUT, "wb") as w:
 print(f"wrote {OUT}: {BEATS} beats @ {BPM} BPM = {total_frames / SAMPLE_RATE:.1f}s")
 ```
 
-- [ ] **Step 2: 產生 WAV**
+- **原始步驟 Step 2: 產生 WAV**
 
 Run: `python3 tools/make_metronome.py`
 Expected: `wrote charts/01-metronome/audio.wav: 64 beats @ 120 BPM = 32.0s`
 
-- [ ] **Step 3: 手寫譜面**
+- **原始步驟 Step 3: 手寫譜面**
 
 120 BPM = 每拍 500ms。`offset_ms = 0`（第一個 click 就在 t=0）。
 
@@ -1421,7 +1447,7 @@ Create `charts/01-metronome/song.json`：
 
 最大 combo = 4 + 4 + 1 + 2 + 6 + 1 + 1 + 1 + 4 = **24**
 
-- [ ] **Step 4: 寫測試確認這張譜面合法**
+- **原始步驟 Step 4: 寫測試確認這張譜面合法**
 
 Append 到 `src/chart.zig` 的測試區。把譜面內容內嵌進測試，讓它不依賴檔案系統：
 
@@ -1469,7 +1495,7 @@ test "節拍器測試譜面合法且 max_combo 為 24" {
 }
 ```
 
-- [ ] **Step 5: 跑測試確認通過**
+- **原始步驟 Step 5: 跑測試確認通過**
 
 Run: `zig build test`
 Expected: PASS（26 個 chart 測試）
@@ -1477,7 +1503,7 @@ Expected: PASS（26 個 chart 測試）
 如果這個測試回報 `error.OverlappingNotes`，表示手寫譜面的間隔不足——這正是
 不變量該攔下的事。調整 note 的時刻讓相鄰的可判定區間不重疊。
 
-- [ ] **Step 6: 忽略產生的 WAV**
+- **原始步驟 Step 6: 忽略產生的 WAV**
 
 Modify `.gitignore`，加一行：
 
@@ -1487,7 +1513,7 @@ charts/*/audio.wav
 
 音檔由腳本產生，不進版控。`song.json` 要進版控。
 
-- [ ] **Step 7: Commit**
+- **原始步驟 Step 7: Commit**
 
 ```bash
 git add tools/make_metronome.py charts/01-metronome/song.json src/chart.zig .gitignore
@@ -1520,7 +1546,7 @@ git commit -m "test: add deterministic metronome fixture
     - `SongClock.update()` — 每帧呼叫一次
     - `SongClock.nowMs() f64`
 
-- [ ] **Step 1: 寫失敗的測試**
+- **原始步驟 Step 1: 寫失敗的測試**
 
 Create `src/clock.zig`，只放測試：
 
@@ -1770,12 +1796,12 @@ test "restart 之後重新對齊錨點" {
 }
 ```
 
-- [ ] **Step 2: 跑測試確認失敗**
+- **原始步驟 Step 2: 跑測試確認失敗**
 
 Run: `zig build test`
 Expected: FAIL — `error: use of undeclared identifier 'SongClock'`
 
-- [ ] **Step 3: 寫實作**
+- **原始步驟 Step 3: 寫實作**
 
 在 `src/clock.zig` 的測試之前插入：
 
@@ -1873,11 +1899,11 @@ pub const SongClock = struct {
 };
 ```
 
-- [ ] **Step 4: 加進模組 root**
+- **原始步驟 Step 4: 加進模組 root**
 
 Modify `src/root.zig`：確認已有 `pub const clock = @import("clock.zig");` 與 `test` 區塊裡的 `_ = clock;`（Step 1 應已完成）。若當初漏了，現在補上。
 
-- [ ] **Step 5: 跑測試確認通過**
+- **原始步驟 Step 5: 跑測試確認通過**
 
 Run: `zig build test`
 Expected: PASS（9 個 clock 測試）
@@ -1887,7 +1913,7 @@ Expected: PASS（9 個 clock 測試）
 「誤差不累積發散」，所以如果實測穩定在某個比 30 大一點的常數上，把斷言改成
 那個常數加餘裕是正確的修法；如果 drift 隨 frame 數持續成長，那是實作有 bug。
 
-- [ ] **Step 6: Commit**
+- **原始步驟 Step 6: Commit**
 
 ```bash
 git add src/clock.zig src/root.zig
@@ -1933,7 +1959,7 @@ tap/center 與 slider 共用同一個狀態機（`pending → tracking → done`
 每帧的呼叫順序（Task 11 的 play 場景會照這個順序）：
 `beginFrame()` → `update()` → 每個按下事件各一次 `keyDown()` → 消費 `judgements()`。
 
-- [ ] **Step 1: 寫失敗的測試**
+- **原始步驟 Step 1: 寫失敗的測試**
 
 Create `src/judge.zig`，只放測試：
 
@@ -2401,12 +2427,12 @@ test "滑動窗口只在全部判完後才算 finished" {
 }
 ```
 
-- [ ] **Step 2: 跑測試確認失敗**
+- **原始步驟 Step 2: 跑測試確認失敗**
 
 Run: `zig build test`
 Expected: FAIL — `error: use of undeclared identifier 'Judge'`
 
-- [ ] **Step 3: 寫型別與輔助函式**
+- **原始步驟 Step 3: 寫型別與輔助函式**
 
 在 `src/judge.zig` 的測試之前插入：
 
@@ -2494,7 +2520,7 @@ const NoteState = struct {
 };
 ```
 
-- [ ] **Step 4: 寫 Judge**
+- **原始步驟 Step 4: 寫 Judge**
 
 接在上面之後：
 
@@ -2689,11 +2715,11 @@ pub const Judge = struct {
 };
 ```
 
-- [ ] **Step 5: 加進模組 root**
+- **原始步驟 Step 5: 加進模組 root**
 
 Modify `src/root.zig`：確認已有 `pub const judge = @import("judge.zig");` 與 `test` 區塊裡的 `_ = judge;`（Step 1 應已完成）。若當初漏了，現在補上。
 
-- [ ] **Step 6: 跑測試確認通過**
+- **原始步驟 Step 6: 跑測試確認通過**
 
 Run: `zig build test`
 Expected: PASS（15 個 judge 測試）
@@ -2702,7 +2728,7 @@ Expected: PASS（15 個 judge 測試）
 `ArrayList` 初始化寫法（`/opt/homebrew/Cellar/zig/0.16.0/lib/zig/std/array_list.zig`
 裡 `Aligned` 的 `empty` 宣告）並照實際名稱修正測試。
 
-- [ ] **Step 7: Commit**
+- **原始步驟 Step 7: Commit**
 
 ```bash
 git add src/judge.zig src/root.zig
@@ -2737,7 +2763,7 @@ tap/center 的時機判定與 slider 的 tick 追蹤共用同一個狀態機
     - `Scorer.apply(j: judge.Judgement)`
     - `Scorer.summary() Summary`
 
-- [ ] **Step 1: 寫失敗的測試**
+- **原始步驟 Step 1: 寫失敗的測試**
 
 Create `src/scoring.zig`，只放測試：
 
@@ -2989,12 +3015,12 @@ test "空譜面以外的分母永遠是 max_combo" {
 }
 ```
 
-- [ ] **Step 2: 跑測試確認失敗**
+- **原始步驟 Step 2: 跑測試確認失敗**
 
 Run: `zig build test`
 Expected: FAIL — `error: use of undeclared identifier 'Scorer'`
 
-- [ ] **Step 3: 寫實作**
+- **原始步驟 Step 3: 寫實作**
 
 在 `src/scoring.zig` 的測試之前插入：
 
@@ -3081,11 +3107,11 @@ pub const Scorer = struct {
 };
 ```
 
-- [ ] **Step 4: 加進模組 root**
+- **原始步驟 Step 4: 加進模組 root**
 
 Modify `src/root.zig`：確認已有 `pub const scoring = @import("scoring.zig");` 與 `test` 區塊裡的 `_ = scoring;`（Step 1 應已完成）。若當初漏了，現在補上。
 
-- [ ] **Step 5: 跑測試確認通過**
+- **原始步驟 Step 5: 跑測試確認通過**
 
 Run: `zig build test`
 Expected: PASS（10 個 scoring 測試）
@@ -3094,7 +3120,7 @@ Expected: PASS（10 個 scoring 測試）
 `simulate` 的 `idealState` 真的有把游標放在正確的位置——判定本身的問題與
 模擬器的問題要分清楚，可以先讓 `mixed` 只留一個 tap 來二分。
 
-- [ ] **Step 6: 確認純核心的測試不需要 raylib**
+- **原始步驟 Step 6: 確認純核心的測試不需要 raylib**
 
 Run: `zig build test 2>&1 | tail -5`
 
@@ -3102,7 +3128,7 @@ Run: `zig build test 2>&1 | tail -5`
 80 個測試全部在不連結 raylib 的模組裡跑完。整首歌可以離線打完——後面接上
 raylib 的外殼時，判定的正確性已經被釘住了。
 
-- [ ] **Step 7: Commit**
+- **原始步驟 Step 7: Commit**
 
 ```bash
 git add src/scoring.zig src/root.zig
@@ -3136,7 +3162,7 @@ git commit -m "feat: add scoring with offline full-song integration test
   - `main.FpsResult = union(enum) { not_fps_arg, invalid, fps: i32 }`
   - `main.parseFpsArg(arg: []const u8) FpsResult`
 
-- [ ] **Step 1: 寫失敗的測試**
+- **原始步驟 Step 1: 寫失敗的測試**
 
 Create `src/main.zig`（先只放測試，實作下一步補）：
 
@@ -3180,12 +3206,12 @@ test "Transition 能帶著結算資料" {
 }
 ```
 
-- [ ] **Step 2: 跑測試確認失敗**
+- **原始步驟 Step 2: 跑測試確認失敗**
 
 Run: `zig build test`
 Expected: FAIL — `error: use of undeclared identifier 'parseFpsArg'`
 
-- [ ] **Step 3: 寫場景轉換型別**
+- **原始步驟 Step 3: 寫場景轉換型別**
 
 Create `src/transition.zig`：
 
@@ -3210,7 +3236,7 @@ pub const Transition = union(enum) {
 };
 ```
 
-- [ ] **Step 4: 寫 main**
+- **原始步驟 Step 4: 寫 main**
 
 在 `src/main.zig` 的測試之前插入：
 
@@ -3273,12 +3299,12 @@ pub fn main(init: std.process.Init) !void {
 }
 ```
 
-- [ ] **Step 5: 跑測試確認通過**
+- **原始步驟 Step 5: 跑測試確認通過**
 
 Run: `zig build test`
 Expected: PASS（4 個 main 測試）
 
-- [ ] **Step 6: 跑起來看**
+- **原始步驟 Step 6: 跑起來看（PENDING-HUMAN）**
 
 Run: `zig build run`
 Expected: 開出 1280×720 的黑底視窗、左上角有文字、系統滑鼠游標消失。按 Esc 或關視窗結束。
@@ -3289,7 +3315,7 @@ Expected: 同上（幀率差異看不出來，但不該報錯）。
 Run: `zig build run -- --fps=99`
 Expected: 印出 `用法: rhythm-game [--fps=60|120|240]` 並以非零狀態結束，不開窗。
 
-- [ ] **Step 7: Commit**
+- **原始步驟 Step 7: Commit**
 
 ```bash
 git add src/main.zig src/transition.zig
@@ -3304,1585 +3330,134 @@ Transition 定義在獨立的檔案，讓場景之間互不認識——場景回
 
 ---
 
-### Task 10: layout / input / render — 把繪圖數學搬進可測的那一側
-
-這個 task 原本的驗證計畫是八項目視檢查。但這個環境跑不起視窗（raylib 的 GLFW
-在此無法建立視窗，`zig build run` 會在 `initWindow` 崩潰——已確認是環境而非
-程式碼：還原成未修改的 `zig init` 樣本會重現同一個崩潰），所以那八項一項都做不到。
-
-**對策：把 `render` 裡的純數學抽出來放進純核心，讓它變成可測的。**
-
-繪圖程式碼裡真正容易錯、而且錯了只能靠眼睛發現的部分，全都是座標數學：
-格編號換算成角度、角度換算成螢幕座標、我們的角度慣例換算成 raylib 扇形 API
-的角度。`rl.drawRing` 本身不會錯。所以把前者搬到不連結 raylib 的那一側，
-它就能被測——而且能被一個**閉環測試**釘死：
-
-> 把每一格的中心角度算成螢幕座標，再把那個座標餵回 `geom.zoneAt`，
-> 必須回到同一格。
-
-這一條涵蓋了「cell 0 是否在正上方」、「編號是否順時針遞增」、「有沒有偏半格」、
-「`unit` 基準對不對」、「正負號對不對」——原本整組目視檢查想驗的東西。
-渲染器與判定器從此共用同一套座標慣例，而且那個共用關係由測試保證。
-
-**Files:**
-- Create: `src/layout.zig`（**純核心**：座標數學，不連結 raylib）
-- Create: `src/input.zig`（exe：raylib 輪詢）
-- Create: `src/render.zig`（exe：只有 `rl.draw*` 呼叫）
-- Modify: `src/root.zig`（登記 `layout`）
-- Modify: `src/main.zig`（主迴圈改成畫環與游標）
-
-**Interfaces:**
-- Consumes: `core.constants.{Cell, ring_cells, r_center, r_dead, r_judge, approach_ms}`、`core.geom.{CursorZone, Arc, zoneAt, angleOf}`、`core.judge.requiredArc`、`core.chart.{Note, Slider}`
-- Produces:
-  - `layout.Point = struct { x: f32, y: f32 }`
-  - `layout.Layout = struct { cx: f32, cy: f32, unit: f32 }`
-    - `Layout.of(screen_w: f32, screen_h: f32) Layout`
-    - `Layout.point(angle_rad: f32, r_frac: f32) Point`
-    - `Layout.radius(r_frac: f32) f32`
-    - `Layout.center() Point`
-  - `layout.cellAngle(cell: Cell) f32` — 格的**前緣**角度（`cell * step`）
-  - `layout.ringDegrees(angle_rad: f32) f32` — 我們的角度 → raylib 扇形角度（度）
-  - `layout.noteRadiusFrac(remaining_ms: f64) f32`
-  - `input.{trigger_keys, Frame, poll}`
-  - `render.{currentLayout, drawStage, drawArc, drawCursor, drawNote}`
-
-- [ ] **Step 1: 寫 layout 的失敗測試**
-
-Create `src/layout.zig`，只放測試，**並同時在 `src/root.zig` 登記**
-（`pub const layout = @import("layout.zig");` 加上 `test` 區塊裡的 `_ = layout;`）
-——否則 Zig 不會編譯這個檔案，Step 2 的預期失敗不會發生。
-
-```zig
-const std = @import("std");
-const c = @import("constants.zig");
-const geom = @import("geom.zig");
-
-const test_w: f32 = 1280;
-const test_h: f32 = 720;
-
-test "Layout.of 以短邊的一半為半徑基準" {
-    const l = Layout.of(test_w, test_h);
-    try std.testing.expectApproxEqAbs(@as(f32, 640), l.cx, 0.001);
-    try std.testing.expectApproxEqAbs(@as(f32, 360), l.cy, 0.001);
-    try std.testing.expectApproxEqAbs(@as(f32, 360), l.unit, 0.001); // min(1280,720)/2
-}
-
-test "point 的四個方位：0 度在正上方、順時針" {
-    const l = Layout.of(800, 800); // 正方形，unit = 400
-    const r: f32 = 0.5; // 半徑 200
-
-    const up = l.point(0, r);
-    try std.testing.expectApproxEqAbs(@as(f32, 400), up.x, 0.01);
-    try std.testing.expectApproxEqAbs(@as(f32, 200), up.y, 0.01); // 螢幕 y 向下
-
-    const right = l.point(std.math.pi / 2.0, r);
-    try std.testing.expectApproxEqAbs(@as(f32, 600), right.x, 0.01);
-    try std.testing.expectApproxEqAbs(@as(f32, 400), right.y, 0.01);
-
-    const down = l.point(std.math.pi, r);
-    try std.testing.expectApproxEqAbs(@as(f32, 400), down.x, 0.01);
-    try std.testing.expectApproxEqAbs(@as(f32, 600), down.y, 0.01);
-
-    const left = l.point(3.0 * std.math.pi / 2.0, r);
-    try std.testing.expectApproxEqAbs(@as(f32, 200), left.x, 0.01);
-    try std.testing.expectApproxEqAbs(@as(f32, 400), left.y, 0.01);
-}
-
-test "繪圖座標與判定分區互為反函數（整組目視檢查的替代品）" {
-    // 這是本 task 最重要的測試。把每一格的中心角度算成螢幕座標，再餵回
-    // geom.zoneAt，必須回到同一格。
-    //
-    // 它一次涵蓋了原本要靠眼睛確認的全部：cell 0 在正上方、編號順時針遞增、
-    // 沒有偏半格、unit 基準正確、正負號正確。渲染器與判定器從此共用同一套
-    // 座標慣例，而那個共用關係由這條測試保證——不是靠註解。
-    //
-    // 在兩種長寬比上各跑一次，因為 unit 取短邊會讓非正方形更容易暴露錯誤。
-    for ([_][2]f32{ .{ 800, 800 }, .{ 1280, 720 } }) |dims| {
-        const w = dims[0];
-        const h = dims[1];
-        const l = Layout.of(w, h);
-        var cell: u32 = 0;
-        while (cell < c.ring_cells) : (cell += 1) {
-            const cc: c.Cell = @intCast(cell);
-            const p = l.point(geom.angleOf(cc), c.r_judge);
-            const z = geom.zoneAt(p.x, p.y, w, h);
-            try std.testing.expect(z == .ring);
-            try std.testing.expectEqual(cc, z.ring);
-        }
-    }
-}
-
-test "cellAngle 回傳格的前緣，不是格中心" {
-    // render 畫扇形需要前緣；geom.angleOf 回傳的是格中心。兩者差半格，
-    // 混用會讓每個 arc 偏半格——這正是審查時抓到的一個介面誤記。
-    const step = std.math.tau / @as(f32, c.ring_cells);
-    try std.testing.expectApproxEqAbs(@as(f32, 0), cellAngle(0), 1e-6);
-    try std.testing.expectApproxEqAbs(step, cellAngle(1), 1e-6);
-    // 格中心比前緣多半格
-    try std.testing.expectApproxEqAbs(cellAngle(0) + step / 2, geom.angleOf(0), 1e-6);
-}
-
-test "ringDegrees 把正上方映射到 raylib 的 -90 度" {
-    // raylib 的扇形 API 以 +X 軸為 0 度，我們以正上方為 0。
-    try std.testing.expectApproxEqAbs(@as(f32, -90), ringDegrees(0), 0.01);
-    try std.testing.expectApproxEqAbs(@as(f32, 0), ringDegrees(std.math.pi / 2.0), 0.01);
-    try std.testing.expectApproxEqAbs(@as(f32, 90), ringDegrees(std.math.pi), 0.01);
-    try std.testing.expectApproxEqAbs(@as(f32, 180), ringDegrees(3.0 * std.math.pi / 2.0), 0.01);
-}
-
-test "ringDegrees 與 cellAngle 合用時，四個方位落在預期的度數" {
-    try std.testing.expectApproxEqAbs(@as(f32, -90), ringDegrees(cellAngle(0)), 0.01);
-    try std.testing.expectApproxEqAbs(@as(f32, 0), ringDegrees(cellAngle(16)), 0.01);
-    try std.testing.expectApproxEqAbs(@as(f32, 90), ringDegrees(cellAngle(32)), 0.01);
-    try std.testing.expectApproxEqAbs(@as(f32, 180), ringDegrees(cellAngle(48)), 0.01);
-}
-
-test "noteRadiusFrac：剛出現在圓心，命中時抵達判定圈" {
-    try std.testing.expectApproxEqAbs(@as(f32, 0), noteRadiusFrac(c.approach_ms), 1e-6);
-    try std.testing.expectApproxEqAbs(c.r_judge, noteRadiusFrac(0), 1e-6);
-    // 一半時間過去 → 一半半徑
-    try std.testing.expectApproxEqAbs(c.r_judge / 2, noteRadiusFrac(c.approach_ms / 2), 1e-5);
-}
-
-test "noteRadiusFrac 夾住超出範圍的輸入" {
-    // 還沒進可見範圍（remaining > approach_ms）與已經過了命中時刻
-    // （remaining < 0）都不該產生超出 [0, r_judge] 的半徑。
-    try std.testing.expectApproxEqAbs(@as(f32, 0), noteRadiusFrac(c.approach_ms * 3), 1e-6);
-    try std.testing.expectApproxEqAbs(c.r_judge, noteRadiusFrac(-500), 1e-6);
-}
-```
-
-- [ ] **Step 2: 跑測試確認失敗**
-
-Run: `zig build test`
-Expected: FAIL — `error: use of undeclared identifier 'Layout'`
-
-- [ ] **Step 3: 寫 layout 的實作**
-
-在 `src/layout.zig` 的測試之前插入：
-
-```zig
-//! 環形畫面的座標數學。**純核心：不連結 raylib。**
-//!
-//! 這些函式之所以不放在 render.zig，是因為它們是繪圖裡唯一會算錯、
-//! 而且算錯只能靠眼睛發現的部分。放在這一側，它們就能被測——尤其是
-//! 「繪圖座標餵回 geom.zoneAt 必須回到同一格」那條閉環測試。
-//!
-//! 角度慣例與 geom 完全一致：0 在正上方（12 點鐘），順時針遞增。
-//! 螢幕座標的 y 向下，所以 y = cy - cos(angle) * r。
-
-pub const Point = struct { x: f32, y: f32 };
-
-pub const Layout = struct {
-    cx: f32,
-    cy: f32,
-    /// 半徑的參考單位 = min(w, h) / 2。所有半徑都以它的比例表示，
-    /// 與 geom.zoneAt 的正規化基準相同——這是閉環測試成立的前提。
-    unit: f32,
-
-    pub fn of(screen_w: f32, screen_h: f32) Layout {
-        return .{
-            .cx = screen_w / 2,
-            .cy = screen_h / 2,
-            .unit = @min(screen_w, screen_h) / 2,
-        };
-    }
-
-    pub fn radius(self: Layout, r_frac: f32) f32 {
-        return r_frac * self.unit;
-    }
-
-    pub fn center(self: Layout) Point {
-        return .{ .x = self.cx, .y = self.cy };
-    }
-
-    /// 角度（弧度，0 在正上方、順時針）+ 半徑比例 → 螢幕座標。
-    pub fn point(self: Layout, angle_rad: f32, r_frac: f32) Point {
-        return .{
-            .x = self.cx + @sin(angle_rad) * r_frac * self.unit,
-            .y = self.cy - @cos(angle_rad) * r_frac * self.unit,
-        };
-    }
-};
-
-/// 格的**前緣**角度。畫扇形要用這個；`geom.angleOf` 回傳的是格中心，
-/// 兩者差半格，混用會讓每個 arc 偏半格。
-pub fn cellAngle(cell: c.Cell) f32 {
-    const step = std.math.tau / @as(f32, c.ring_cells);
-    return @as(f32, @floatFromInt(cell)) * step;
-}
-
-/// 我們的角度（0 = 正上方，順時針）→ raylib 扇形 API 的角度（度）。
-/// raylib 的 0 度在 +X 軸，所以要往回轉 90 度。
-pub fn ringDegrees(angle_rad: f32) f32 {
-    return angle_rad * 180.0 / std.math.pi - 90.0;
-}
-
-/// note 的飛行半徑比例：剛進可見範圍時在圓心，命中時抵達判定圈。
-/// 兩端都夾住，所以超出範圍的輸入不會畫到判定圈之外或圓心之內。
-pub fn noteRadiusFrac(remaining_ms: f64) f32 {
-    const t = 1.0 - std.math.clamp(remaining_ms / c.approach_ms, 0.0, 1.0);
-    return @floatCast(t * c.r_judge);
-}
-```
-
-- [ ] **Step 4: 跑測試確認通過**
-
-Run: `zig build test`
-Expected: PASS（8 個 layout 測試全綠）
-
-「繪圖座標與判定分區互為反函數」那條若失敗，**不要去改 `geom`**——`geom` 的
-慣例已經被它自己的測試釘住了。問題在 `Layout.point` 的正負號或 `unit` 基準。
-
-- [ ] **Step 5: 寫 input**
-
-Create `src/input.zig`：
-
-```zig
-//! raylib 的輪詢層。只負責把滑鼠與鍵盤狀態轉成純型別，
-//! 幾何運算一律交給 core.geom（它在不連結 raylib 的那一側）。
-
-const std = @import("std");
-const rl = @import("raylib");
-const core = @import("rhythm_game");
-
-const geom = core.geom;
-
-/// 兩個觸發鍵在判定上完全等效。設兩個是為了讓高密度連打可以交替按，
-/// 降低單指負擔（spec §2）。
-pub const trigger_keys = [_]rl.KeyboardKey{ .z, .x };
-
-pub const Frame = struct {
-    zone: geom.CursorZone,
-    /// 任一觸發鍵處於按下狀態。slider 的覆蓋判定用這個。
-    key_held: bool,
-    /// 本帧有幾個觸發鍵從放開變成按下。
-    presses: u8,
-};
-
-pub fn poll() Frame {
-    const m = rl.getMousePosition();
-    const w: f32 = @floatFromInt(rl.getScreenWidth());
-    const h: f32 = @floatFromInt(rl.getScreenHeight());
-
-    var held = false;
-    var presses: u8 = 0;
-    for (trigger_keys) |k| {
-        if (rl.isKeyDown(k)) held = true;
-        if (rl.isKeyPressed(k)) presses += 1;
-    }
-
-    return .{
-        .zone = geom.zoneAt(m.x, m.y, w, h),
-        .key_held = held,
-        .presses = presses,
-    };
-}
-```
-
-- [ ] **Step 6: 寫 render**
-
-Create `src/render.zig`。它只剩 `rl.draw*` 呼叫與型別轉換——所有數學都在
-`core.layout` 裡且已被測過。
-
-```zig
-//! 全部的繪圖。純程式繫圖形，無外部素材（spec §7）。
-//!
-//! 座標數學一律委派給 core.layout（純核心，有測試）。這個檔案只做兩件事：
-//! 把 layout.Point 轉成 rl.Vector2，以及呼叫 raylib 的繪圖函式。
-//! 不要在這裡重算角度或半徑——那會讓閉環測試失去意義。
-
-const std = @import("std");
-const rl = @import("raylib");
-const core = @import("rhythm_game");
-
-const c = core.constants;
-const geom = core.geom;
-const layout = core.layout;
-
-fn v(p: layout.Point) rl.Vector2 {
-    return .{ .x = p.x, .y = p.y };
-}
-
-/// 從 raylib 讀出目前的視窗尺寸，交給純核心算 Layout。
-pub fn currentLayout() layout.Layout {
-    return layout.Layout.of(
-        @floatFromInt(rl.getScreenWidth()),
-        @floatFromInt(rl.getScreenHeight()),
-    );
-}
-
-/// 環、死區邊界、中央判定圈、判定圈、刻度。
-pub fn drawStage(l: layout.Layout) void {
-    const ctr = v(l.center());
-
-    rl.drawCircleLinesV(ctr, l.radius(c.r_judge), .{ .r = 70, .g = 80, .b = 100, .a = 255 });
-    rl.drawCircleLinesV(ctr, l.radius(c.r_dead), .{ .r = 60, .g = 70, .b = 90, .a = 255 });
-    rl.drawCircleV(ctr, l.radius(c.r_center), .{ .r = 25, .g = 28, .b = 38, .a = 255 });
-    rl.drawCircleLinesV(ctr, l.radius(c.r_center), .{ .r = 90, .g = 100, .b = 130, .a = 255 });
-
-    // 每 8 格一條刻度，讓玩家有角度參考
-    var cell: u32 = 0;
-    while (cell < c.ring_cells) : (cell += 8) {
-        const a = layout.cellAngle(@intCast(cell));
-        rl.drawLineEx(
-            v(l.point(a, c.r_dead)),
-            v(l.point(a, c.r_judge)),
-            1,
-            .{ .r = 45, .g = 52, .b = 68, .a = 255 },
-        );
-    }
-}
-
-/// 畫環上的一段 arc。
-pub fn drawArc(
-    l: layout.Layout,
-    arc: geom.Arc,
-    r_in_frac: f32,
-    r_out_frac: f32,
-    color: rl.Color,
-) void {
-    const step = std.math.tau / @as(f32, c.ring_cells);
-    const a0 = layout.cellAngle(arc.cell);
-    const a1 = a0 + @as(f32, @floatFromInt(arc.width)) * step;
-    rl.drawRing(
-        v(l.center()),
-        l.radius(r_in_frac),
-        l.radius(r_out_frac),
-        layout.ringDegrees(a0),
-        layout.ringDegrees(a1),
-        32,
-        color,
-    );
-}
-
-/// 游標指示。環被離散成 64 格而滑鼠是連續的，所以必須把當前的格畫出來。
-pub fn drawCursor(l: layout.Layout, zone: geom.CursorZone) void {
-    const bright: rl.Color = .{ .r = 120, .g = 220, .b = 255, .a = 220 };
-    switch (zone) {
-        .ring => |cell| drawArc(
-            l,
-            .{ .cell = cell, .width = 1 },
-            c.r_judge - 0.06,
-            c.r_judge + 0.06,
-            bright,
-        ),
-        .center => rl.drawCircleLinesV(v(l.center()), l.radius(c.r_center), bright),
-        .outside => {},
-    }
-}
-
-/// 畫一個 note。chart_time_ms 是譜面時間軸上的現在。
-pub fn drawNote(l: layout.Layout, n: core.chart.Note, chart_time_ms: f64) void {
-    const remaining = @as(f64, @floatFromInt(n.time_ms)) - chart_time_ms;
-    if (remaining > c.approach_ms) return; // 還沒進可見範圍
-    const r = layout.noteRadiusFrac(remaining);
-
-    switch (n.kind) {
-        .tap => |arc| drawArc(l, arc, r - 0.03, r + 0.03, .{ .r = 240, .g = 240, .b = 250, .a = 255 }),
-        .center => {
-            // 中央 note：圓心的圈隨時間收緊
-            const t = layout.noteRadiusFrac(remaining) / c.r_judge;
-            rl.drawCircleLinesV(
-                v(l.center()),
-                l.radius(c.r_center) * (0.3 + 0.7 * t),
-                .{ .r = 255, .g = 200, .b = 120, .a = 255 },
-            );
-        },
-        .slider => |s| {
-            drawArc(l, s.from, r - 0.04, r + 0.04, .{ .r = 150, .g = 230, .b = 180, .a = 255 });
-            // 已經開始之後，畫出當下應該追蹤到的位置
-            if (remaining <= 0) {
-                const dur: f64 = @floatFromInt(s.duration_ms);
-                const prog = std.math.clamp(-remaining / dur, 0.0, 1.0);
-                const n_ticks: f64 = @floatFromInt(s.combo_count);
-                const tick: u32 = @intFromFloat(prog * n_ticks);
-                const want = core.judge.requiredArc(s, @min(tick, s.combo_count - 1));
-                drawArc(l, want, c.r_judge - 0.05, c.r_judge + 0.05, .{ .r = 150, .g = 230, .b = 180, .a = 180 });
-            }
-        },
-    }
-}
-```
-
-- [ ] **Step 7: 把主迴圈改成畫環與游標**
-
-Modify `src/main.zig`：在 import 區加
-
-```zig
-const input = @import("input.zig");
-const render = @import("render.zig");
-```
-
-把主迴圈整段換成：
-
-```zig
-    while (!rl.windowShouldClose()) {
-        const frame = input.poll();
-        const l = render.currentLayout();
-
-        rl.beginDrawing();
-        defer rl.endDrawing();
-        rl.clearBackground(.{ .r = 12, .g = 14, .b = 20, .a = 255 });
-
-        render.drawStage(l);
-        render.drawCursor(l, frame.zone);
-
-        // 臨時的除錯資訊，Task 11 會換成真的遊玩畫面
-        var buf: [128]u8 = undefined;
-        const text = switch (frame.zone) {
-            .ring => |cell| std.fmt.bufPrintZ(&buf, "ring cell {d}  held={}", .{ cell, frame.key_held }) catch "?",
-            .center => std.fmt.bufPrintZ(&buf, "CENTER  held={}", .{frame.key_held}) catch "?",
-            .outside => std.fmt.bufPrintZ(&buf, "outside (dead zone)", .{}) catch "?",
-        };
-        rl.drawText(text, 20, 20, 20, .ray_white);
-    }
-```
-
-- [ ] **Step 8: 跑測試與編譯**
-
-Run: `zig build test`
-Expected: PASS（含 8 個新的 layout 測試）
-
-Run: `zig build`
-Expected: 編譯乾淨。
-
-**`zig build run` 在此環境會崩潰**（GLFW 無法建立視窗），那是環境限制而非
-程式碼問題。不要為此「修」任何東西。可以執行它以確認崩潰發生在
-`initWindow` 而非更早，但要把結果如實回報為環境限制。
-
-- [ ] **Step 9: 列出 PENDING-HUMAN 項目**
-
-以下只有人在有顯示器的機器上才能確認。逐條寫進 report，**不得聲稱已驗證**：
-
-1. 畫面中央有中央判定圈、死區外緣細線、判定圈
-2. 滑鼠移到環上時判定圈出現一格高亮，且跟著滑鼠轉
-3. 滑鼠移到正上方時顯示 `ring cell 0`
-4. 順時針轉動時編號遞增：0 → 16（右）→ 32（下）→ 48（左）
-5. 滑鼠在正中央顯示 `CENTER`，中央圈外框變亮
-6. 在中央圈與死區之間顯示 `outside (dead zone)`，無任何高亮
-7. 滑鼠在畫面角落仍顯示 ring cell（ring 區無外緣上限）
-8. 按住 Z 或 X 時 `held=true`，兩鍵都要試
-
-注意第 3、4、5、7 項的**數學部分**已經由 Step 1 的閉環測試涵蓋了——
-人要確認的是「畫出來的東西和那些數字一致」，而不是數字本身。
-
-- [ ] **Step 10: Commit**
-
-```bash
-git add src/layout.zig src/input.zig src/render.zig src/root.zig src/main.zig
-git commit -m "feat: add testable layout math, raylib input polling, and ring rendering
-
-這個環境跑不起視窗（GLFW 無法建立視窗），所以原本的八項目視驗證一項都做不到。
-對策是把 render 裡的純數學抽進 core.layout——繪圖裡唯一會算錯、而且算錯只能
-靠眼睛發現的部分就是座標數學，放到不連結 raylib 的那一側它就能被測。
-
-關鍵測試是閉環的：把每一格的中心角度算成螢幕座標，再餵回 geom.zoneAt，
-必須回到同一格。它一次涵蓋 cell 0 在正上方、編號順時針、沒有偏半格、
-unit 基準正確、正負號正確——原本整組目視檢查想驗的東西。渲染器與判定器
-從此共用同一套座標慣例，而那個共用關係由測試保證而非註解。
-
-render.zig 因此只剩 rl.draw* 呼叫與 Point → Vector2 的轉換。"
-```
-
-### Task 11: scene/play — 把音訊、時鐘、判定、計分、繪圖接起來
-
-第一個真正能玩的版本。載入節拍器譜面、播音樂、判定、畫出來、結束時回報結算。
-
-**這個 task 有一個必須注意的所有權陷阱**：`Judge` 持有 `*const Chart`，所以 `Play` 必須**就地初始化**（`init(self: *Play, ...)`）而不能回傳值——回傳值會讓 `judge.chart` 指向搬移前的位址。
-
-驗證方式是用耳朵：note 命中的瞬間必須和節拍器的 click 聲重合。
-
-**Files:**
-- Create: `src/scene/play.zig`
-- Modify: `src/main.zig`（主迴圈改成跑 play 場景）
-
-**Interfaces:**
-- Consumes: `core.chart.loadFromDir`、`core.judge.Judge`、`core.scoring.Scorer`、`core.clock.SongClock`、`core.layout.{Layout, cellAngle}`、`input.poll`、`render.{currentLayout, drawStage, drawCursor, drawNote}`、`transition.Transition`
-- Produces:
-  - `play.Play`
-    - `Play.init(self: *Play, gpa: Allocator, io: std.Io, song_dir: []const u8, difficulty: usize) !void` — 就地初始化
-    - `Play.deinit()`
-    - `Play.update() transition.Transition`
-    - `Play.draw()`
-
-- [ ] **Step 1: 寫 play 場景**
-
-Create `src/scene/play.zig`：
-
-```zig
-//! 遊玩場景。
-//!
-//! 注意所有權：Judge 持有 *const Chart，所以 Play 必須就地初始化
-//! （init 收 *Play），初始化之後不得搬移這個結構。
-
-const std = @import("std");
-const rl = @import("raylib");
-const core = @import("rhythm_game");
-const input = @import("../input.zig");
-const render = @import("../render.zig");
-const transition = @import("../transition.zig");
-
-const c = core.constants;
-const Allocator = std.mem.Allocator;
-
-const effect_life_ms: f64 = 260;
-
-// SongClock 的時間來源是函式指標，而函式指標無法捕捉狀態，
-// 所以當前播放中的 Music 放檔案層級。一次只播一首歌，所以這樣就夠。
-var active_music: ?rl.Music = null;
-
-fn anchorMs() f64 {
-    const m = active_music orelse return 0;
-    return @as(f64, rl.getMusicTimePlayed(m)) * 1000.0;
-}
-
-fn monoMs() f64 {
-    return rl.getTime() * 1000.0;
-}
-
-/// 命中特效。固定大小 pool——遊玩中不配置記憶體（spec §7）。
-const EffectPool = struct {
-    const cap = 64;
-
-    const Effect = struct {
-        active: bool = false,
-        at: rl.Vector2 = .{ .x = 0, .y = 0 },
-        age_ms: f64 = 0,
-        grade: core.judge.Grade = .perfect,
-    };
-
-    items: [cap]Effect = @splat(.{}),
-
-    fn spawn(self: *EffectPool, at: rl.Vector2, grade: core.judge.Grade) void {
-        for (&self.items) |*e| {
-            if (!e.active) {
-                e.* = .{ .active = true, .at = at, .age_ms = 0, .grade = grade };
-                return;
-            }
-        }
-        // pool 滿了就丟掉這個特效。不配置記憶體這條優先。
-    }
-
-    fn advance(self: *EffectPool, dt_ms: f64) void {
-        for (&self.items) |*e| {
-            if (!e.active) continue;
-            e.age_ms += dt_ms;
-            if (e.age_ms > effect_life_ms) e.active = false;
-        }
-    }
-};
-
-fn gradeColor(g: core.judge.Grade) rl.Color {
-    return switch (g) {
-        .perfect => .{ .r = 255, .g = 240, .b = 160, .a = 255 },
-        .great => .{ .r = 150, .g = 230, .b = 255, .a = 255 },
-        .good => .{ .r = 160, .g = 200, .b = 160, .a = 255 },
-        .miss => .{ .r = 220, .g = 90, .b = 90, .a = 255 },
-    };
-}
-
-pub const Play = struct {
-    gpa: Allocator,
-    chart: core.chart.Chart,
-    music: rl.Music,
-    judge: core.judge.Judge,
-    scorer: core.scoring.Scorer,
-    clock: core.clock.SongClock,
-    effects: EffectPool,
-    last_frame: input.Frame,
-    /// 上一帧的譜面時間。用來偵測時鐘向後跳——judge 的契約要求 now_ms
-    /// 單調不減，而 SongClock 在錨點誤差過大時會硬重置，那可以是向後的。
-    last_now_ms: f64,
-
-    /// 就地初始化。judge 會持有 &self.chart，所以之後不得搬移 self。
-    pub fn init(
-        self: *Play,
-        gpa: Allocator,
-        io: std.Io,
-        song_dir: []const u8,
-        difficulty: usize,
-    ) !void {
-        var dir = try std.Io.Dir.cwd().openDir(io, song_dir, .{});
-        defer dir.close(io);
-
-        self.gpa = gpa;
-        self.chart = try core.chart.loadFromDir(gpa, io, dir, difficulty);
-        errdefer self.chart.deinit();
-
-        var path_buf: [512]u8 = undefined;
-        const audio_path = try std.fmt.bufPrintZ(
-            &path_buf,
-            "{s}/{s}",
-            .{ song_dir, self.chart.audio },
-        );
-        self.music = try rl.loadMusicStream(audio_path);
-        errdefer rl.unloadMusicStream(self.music);
-
-        self.judge = try core.judge.Judge.init(gpa, &self.chart);
-        self.scorer = core.scoring.Scorer.init(&self.chart);
-        self.clock = .{ .anchorFn = anchorMs, .monoFn = monoMs };
-        self.effects = .{};
-        self.last_frame = .{ .zone = .outside, .key_held = false, .presses = 0 };
-        self.last_now_ms = -std.math.inf(f64);
-
-        active_music = self.music;
-        self.clock.restart();
-        rl.playMusicStream(self.music);
-    }
-
-    pub fn deinit(self: *Play) void {
-        active_music = null;
-        rl.unloadMusicStream(self.music);
-        self.judge.deinit(self.gpa);
-        self.chart.deinit();
-        self.* = undefined;
-    }
-
-    /// 譜面時間軸上的現在。chart.offset_ms 是音訊起點與譜面零點的距離
-    /// （spec §6「時間基準」）。
-    fn chartTimeMs(self: *const Play) f64 {
-        return self.clock.nowMs() - @as(f64, @floatFromInt(self.chart.offset_ms));
-    }
-
-    pub fn update(self: *Play) transition.Transition {
-        rl.updateMusicStream(self.music);
-        self.clock.update();
-
-        const frame = input.poll();
-        self.last_frame = frame;
-        const now = self.chartTimeMs();
-
-        // judge 要求 now_ms 單調不減（見 judge.zig 的模組註解）。SongClock 在
-        // 錨點誤差超過 clock_reset_ms 時會硬重置，而那可以是向後的——音訊停住
-        // （裝置暫停、長時間卡頓）後恢復就會這樣。
-        //
-        // 繼續餵的後果不是崩潰而是靜默錯誤：judge 的狀態只往前走，所以那段
-        // 被重播的區間裡每次按鍵都會被丟棄，既不計分也不算 MISS。與其讓玩家
-        // 打一段不算分的歌，不如當場結束這一局，把當下的成績送去結算。
-        if (now + c.clock_reset_ms < self.last_now_ms) {
-            return .{ .to_result = self.scorer.summary() };
-        }
-        self.last_now_ms = now;
-
-        // Task 7 文件化的順序：beginFrame → update → keyDown → 消費
-        self.judge.beginFrame();
-        self.judge.update(now, frame.zone, frame.key_held);
-
-        var p: u8 = 0;
-        while (p < frame.presses) : (p += 1) {
-            self.judge.keyDown(now, frame.zone);
-        }
-
-        const l = render.currentLayout();
-        for (self.judge.judgements()) |jd| {
-            self.scorer.apply(jd);
-            self.effects.spawn(effectPoint(l, self.chart.notes[jd.note_index], frame.zone), jd.grade);
-        }
-
-        // 判定緩衝區溢出代表計分的輸入已經不完整（chart 的 tick 間距下限
-        // 讓正常譜面到不了這裡）。不要默默繼續——結束這一局。
-        if (self.judge.dropped_events > 0) {
-            return .{ .to_result = self.scorer.summary() };
-        }
-
-        self.effects.advance(@as(f64, rl.getFrameTime()) * 1000.0);
-
-        if (rl.isKeyPressed(.escape)) return .to_select;
-        if (self.judge.finished()) return .{ .to_result = self.scorer.summary() };
-        return .stay;
-    }
-
-    pub fn draw(self: *const Play) void {
-        const l = render.currentLayout();
-        const now = self.chartTimeMs();
-
-        render.drawStage(l);
-
-        // notes 依時間遞增，所以一碰到還沒進可見範圍的就可以停。
-        for (self.chart.notes) |n| {
-            const remaining = @as(f64, @floatFromInt(n.time_ms)) - now;
-            if (remaining > c.approach_ms) break;
-            if (now > @as(f64, @floatFromInt(n.judgeEndMs()))) continue;
-            render.drawNote(l, n, now);
-        }
-
-        render.drawCursor(l, self.last_frame.zone);
-        self.drawEffects(l);
-        self.drawHud();
-    }
-
-    fn drawEffects(self: *const Play, l: core.layout.Layout) void {
-        _ = l;
-        for (self.effects.items) |e| {
-            if (!e.active) continue;
-            const t: f32 = @floatCast(e.age_ms / effect_life_ms);
-            var col = gradeColor(e.grade);
-            col.a = @intFromFloat(220.0 * (1.0 - t));
-            rl.drawCircleLinesV(e.at, 8.0 + 46.0 * t, col);
-        }
-    }
-
-    fn drawHud(self: *const Play) void {
-        const s = self.scorer.summary();
-        var buf: [128]u8 = undefined;
-
-        if (s.combo > 1) {
-            const combo = std.fmt.bufPrintZ(&buf, "{d}", .{s.combo}) catch "?";
-            rl.drawText(combo, 24, 24, 48, .{ .r = 255, .g = 240, .b = 180, .a = 255 });
-        }
-
-        var buf2: [128]u8 = undefined;
-        const acc = std.fmt.bufPrintZ(&buf2, "{d:.2}%", .{s.achievement}) catch "?";
-        rl.drawText(acc, 24, 80, 24, .ray_white);
-    }
-};
-
-/// 特效出現的位置：環上的 note 在它的 arc 中點，center note 在圓心。
-fn effectPoint(
-    l: core.layout.Layout,
-    n: core.chart.Note,
-    zone: core.geom.CursorZone,
-) rl.Vector2 {
-    _ = zone;
-    // arc 的中點角度 = 前緣 + 寬度的一半。用 core.layout 的 cellAngle 當前緣，
-    // 不要自己重算——那條慣例由 layout 的閉環測試保證。
-    const step = std.math.tau / @as(f32, c.ring_cells);
-    const p = switch (n.kind) {
-        .center => l.center(),
-        .tap => |arc| l.point(
-            core.layout.cellAngle(arc.cell) + @as(f32, @floatFromInt(arc.width)) / 2 * step,
-            c.r_judge,
-        ),
-        .slider => |sl| l.point(
-            core.layout.cellAngle(sl.from.cell) + @as(f32, @floatFromInt(sl.from.width)) / 2 * step,
-            c.r_judge,
-        ),
-    };
-    return .{ .x = p.x, .y = p.y };
-}
-```
-
-- [ ] **Step 2: 讓 main 跑 play 場景**
-
-Modify `src/main.zig`：在 import 區加 `const play_scene = @import("scene/play.zig");`
-
-把 `main` 裡 `rl.hideCursor();` 之後的整段主迴圈換成：
-
-```zig
-    var play: play_scene.Play = undefined;
-    // Task 12 會把這裡換成選歌場景的輸出。
-    try play.init(init.gpa, init.io, "charts/01-metronome", 0);
-    defer play.deinit();
-
-    while (!rl.windowShouldClose()) {
-        switch (play.update()) {
-            .stay => {},
-            .to_result => |summary| {
-                std.debug.print(
-                    "達成率 {d:.2}%  PERFECT {d} GREAT {d} GOOD {d} MISS {d}  MAX COMBO {d}\n",
-                    .{
-                        summary.achievement, summary.perfect, summary.great,
-                        summary.good,        summary.miss,    summary.max_combo,
-                    },
-                );
-                break;
-            },
-            .to_select, .quit => break,
-            .to_play => unreachable, // play 場景不會要求進入 play
-        }
-
-        rl.beginDrawing();
-        defer rl.endDrawing();
-        rl.clearBackground(.{ .r = 12, .g = 14, .b = 20, .a = 255 });
-        play.draw();
-    }
-```
-
-- [ ] **Step 3: 跑測試確認沒壞**
-
-Run: `zig build test`
-Expected: PASS
-
-- [ ] **Step 4: 確認音檔存在**
-
-Run: `ls charts/01-metronome/`
-Expected: 看到 `song.json` 與 `audio.wav`。
-若缺 `audio.wav`，跑 `python3 tools/make_metronome.py`（Task 5）。
-
-- [ ] **Step 5: 用耳朵驗證時序（本 task 的重點）**
-
-Run: `zig build run`
-
-逐項確認：
-
-1. 聽得到 120 BPM 的節拍器，每四拍一次重音
-2. note 從圓心往外飛，在判定圈附近抵達
-3. **把游標放在 note 的 arc 上、在它抵達判定圈的瞬間按 Z——左上角的達成率要是 `100.00%`**
-4. 連續命中時左上角出現 combo 數字
-5. 兩條 slider：第一條順時針、第二條**逆時針**。按住 Z 用滑鼠沿環追蹤，
-   畫面上會有一段跟著走的 arc
-6. 兩個 center note：游標要移回中央圈再按
-7. 刻意不按任何鍵 → note 過去後出現紅色特效，達成率下降
-8. 打完最後一個 note 後程式印出結算並結束
-9. 中途按 Esc 立刻結束
-
-**第 3 項是關鍵：** 如果「看起來命中了但判定偏了」，問題在時間基準。
-依序檢查：`chart.offset_ms` 是否為 0（節拍器譜面應該是）、
-`chartTimeMs()` 是否真的減掉了 offset、`SongClock` 的錨點是否確實是
-`getMusicTimePlayed() * 1000`（單位是秒轉毫秒，漏乘 1000 會差 1000 倍）。
-
-**如果判定一致地偏早或偏晚一個固定量**，那是裝置輸出延遲，屬於
-`SongClock.calibration_ms` 的範圍（spec §1 說第一版固定 0）。先確認偏差量
-是否穩定，再決定是不是要把它寫進常數——不要為了湊這個去改判定窗。
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add src/scene/play.zig src/main.zig
-git commit -m "feat: add play scene wiring audio, clock, judge, scoring, render
-
-Play 必須就地初始化：Judge 持有 *const Chart，回傳值會讓那個指標
-指向搬移前的位址。
-
-SongClock 的時間來源是函式指標（無法捕捉狀態），所以播放中的 Music
-放檔案層級——一次只播一首歌。
-
-命中特效用固定大小 pool，遊玩中不配置記憶體（spec §7）。
-時序正確性以節拍器譜面用耳朵驗證：命中瞬間必須和 click 聲重合。"
-```
-
----
-
-### Task 12: scene/select 與 scene/result — 完成三場景迴圈
-
-交付 spec §1 定義的「完成」：選歌 → 遊玩 → 結算，能重試、能退回。
-
-兩個新東西：
-
-1. **`chart.parseInfo`** —— 選歌畫面需要歌名與難度清單，而且 spec §9 要求壞譜面**在選歌畫面就被攔下並顯示原因**。所以 `parseInfo` 會驗證每個難度（跑同一套不變量），把失敗的歌標成不可選。
-2. **`transition.SongRef`** —— `to_play` 原本帶 `[]const u8`，但那個字串由 select 場景的 arena 擁有，而 main 會在進入 play 之前先 deinit select → 懸空指標。改成**把路徑以固定陣列按值攜帶**，生命週期問題直接消失。
-
-**Files:**
-- Modify: `src/chart.zig`（抽出 `buildNotes`，新增 `parseInfo` / `SongInfo`）
-- Modify: `src/transition.zig`（`to_play` 改成 `SongRef`）
-- Create: `src/scene/select.zig`
-- Create: `src/scene/result.zig`
-- Modify: `src/main.zig`（三場景的狀態機）
-
-**Interfaces:**
-- Consumes: Task 3 的 `convertNote` / `lessByTime` / `checkNoOverlap`、`core.scoring.Summary`
-- Produces:
-  - `chart.DifficultyInfo = struct { name: []const u8, level: u8, note_count: usize, max_combo: u32 }`
-  - `chart.SongInfo = struct { arena, title, artist, audio, offset_ms, bpm, difficulties: []DifficultyInfo }`，含 `deinit()`
-  - `chart.parseInfo(gpa: Allocator, json_bytes: []const u8) ParseError!SongInfo`
-  - `chart.loadInfoFromDir(gpa: Allocator, io: std.Io, dir: std.Io.Dir) LoadError!SongInfo`
-  - `transition.SongRef = struct { buf: [256]u8, len: usize, difficulty: usize }`，含 `init(path, difficulty)` 與 `path()`
-  - `select.Select`：`init(self, gpa, io) !void`、`deinit()`、`update() Transition`、`draw()`
-  - `result.Result`：`init(summary, song) Result`、`update() Transition`、`draw()`
-
-- [ ] **Step 1: 寫 parseInfo 的失敗測試**
-
-Append 到 `src/chart.zig` 的測試區：
-
-```zig
-test "parseInfo 讀出歌曲與難度清單" {
-    const j =
-        \\{
-        \\  "format": 1, "title": "Two Diffs", "artist": "A",
-        \\  "audio": "a.wav", "offset_ms": 0, "bpm": 150,
-        \\  "difficulties": [
-        \\    { "name": "BASIC", "level": 3, "notes": [
-        \\      { "t": 0, "type": "center" } ]},
-        \\    { "name": "HARD", "level": 9, "notes": [
-        \\      { "t": 0, "type": "center" },
-        \\      { "t": 500, "type": "slider", "cell": 0, "width": 4,
-        \\        "sweep": 8, "dur": 400, "combo": 3 } ]}
-        \\  ]
-        \\}
-    ;
-    var info = try parseInfo(std.testing.allocator, j);
-    defer info.deinit();
-
-    try std.testing.expectEqualStrings("Two Diffs", info.title);
-    try std.testing.expectEqualStrings("a.wav", info.audio);
-    try std.testing.expectEqual(@as(i32, 0), info.offset_ms);
-    try std.testing.expectEqual(@as(usize, 2), info.difficulties.len);
-
-    try std.testing.expectEqualStrings("BASIC", info.difficulties[0].name);
-    try std.testing.expectEqual(@as(u32, 1), info.difficulties[0].max_combo);
-
-    try std.testing.expectEqualStrings("HARD", info.difficulties[1].name);
-    try std.testing.expectEqual(@as(usize, 2), info.difficulties[1].note_count);
-    try std.testing.expectEqual(@as(u32, 4), info.difficulties[1].max_combo); // 1 + 3
-}
-
-test "parseInfo 驗證每個難度——任一難度壞掉就整首歌失敗" {
-    // 第二個難度的兩個 note 判定區間重疊
-    const j =
-        \\{
-        \\  "format": 1, "title": "T", "artist": "A",
-        \\  "audio": "a.wav", "offset_ms": 0, "bpm": 150,
-        \\  "difficulties": [
-        \\    { "name": "OK", "level": 1, "notes": [
-        \\      { "t": 0, "type": "center" } ]},
-        \\    { "name": "BAD", "level": 9, "notes": [
-        \\      { "t": 0, "type": "center" },
-        \\      { "t": 100, "type": "center" } ]}
-        \\  ]
-        \\}
-    ;
-    try std.testing.expectError(
-        error.OverlappingNotes,
-        parseInfo(std.testing.allocator, j),
-    );
-}
-
-test "loadFromDir 端對端：讀檔後釋放 buffer，字串仍然有效" {
-    // 這是 Task 3 的 Critical bug 唯一能被直接抓到的形狀。parse 的純函式測試
-    // 永遠看不見它——那些測試的輸入位元組還活著，所以「字串指向輸入 buffer」
-    // 這件事完全無害。只有走完「讀檔 → parse → 釋放 buffer」整條路才會現形。
-    const t_io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    try tmp.dir.writeFile(t_io, .{ .sub_path = "song.json", .data = test_json });
-
-    var ch = try loadFromDir(std.testing.allocator, t_io, tmp.dir, 0);
-    defer ch.deinit();
-
-    // loadFromDir 內部的 defer gpa.free(bytes) 此時已經執行過了。
-    try std.testing.expectEqualStrings("Example", ch.title);
-    try std.testing.expectEqualStrings("Someone", ch.artist);
-    try std.testing.expectEqualStrings("audio.wav", ch.audio);
-    try std.testing.expectEqualStrings("BASIC", ch.difficulty_name);
-    try std.testing.expectEqual(@as(usize, 3), ch.notes.len);
-}
-
-test "loadInfoFromDir 端對端：同樣的釋放順序" {
-    const t_io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    try tmp.dir.writeFile(t_io, .{ .sub_path = "song.json", .data = test_json });
-
-    var info = try loadInfoFromDir(std.testing.allocator, t_io, tmp.dir);
-    defer info.deinit();
-
-    try std.testing.expectEqualStrings("Example", info.title);
-    try std.testing.expectEqualStrings("audio.wav", info.audio);
-    try std.testing.expectEqual(@as(usize, 1), info.difficulties.len);
-}
-
-test "loadFromDir 在 song.json 不存在時回傳 error" {
-    const t_io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    try std.testing.expectError(
-        error.FileNotFound,
-        loadFromDir(std.testing.allocator, t_io, tmp.dir, 0),
-    );
-}
-```
-
-`std.testing.io` 只在 `builtin.is_test` 時存在，而 `std.testing.tmpDir` 會在
-`.zig-cache/tmp/` 下開一個隨機命名的目錄並由 `cleanup()` 刪掉——所以這三個測試
-不需要任何外部準備，也不會留下垃圾。
-
-- [ ] **Step 2: 跑測試確認失敗**
-
-Run: `zig build test`
-Expected: FAIL — `error: use of undeclared identifier 'parseInfo'`
-
-- [ ] **Step 3: 重構 chart.zig 並加上 parseInfo**
-
-把 `parse` 裡建 notes 的那一段抽成共用的 helper，然後讓 `parse` 用它。
-在 `src/chart.zig` 裡，把 `parse` 中的這幾行
-
-```zig
-    const notes = try a.alloc(Note, diff.notes.len);
-    for (diff.notes, 0..) |rn, i| notes[i] = try convertNote(rn);
-
-    // 不信任檔案裡的順序。
-    std.mem.sort(Note, notes, {}, lessByTime);
-    try checkNoOverlap(notes);
-```
-
-換成
-
-```zig
-    const notes = try buildNotes(a, diff.notes);
-```
-
-並在 `lessByTime` 旁邊新增：
-
-```zig
-/// 轉換 + 排序 + 驗證。parse 與 parseInfo 共用，所以兩邊的不變量一定一致。
-fn buildNotes(a: Allocator, raw: []const RawNote) ParseError![]Note {
-    if (raw.len == 0) return error.EmptyChart;
-    const notes = try a.alloc(Note, raw.len);
-    for (raw, 0..) |rn, i| notes[i] = try convertNote(rn);
-    // 不信任檔案裡的順序。
-    std.mem.sort(Note, notes, {}, lessByTime);
-    try checkNoOverlap(notes);
-    return notes;
-}
-```
-
-（`parse` 裡原本的 `if (diff.notes.len == 0) return error.EmptyChart;` 可以刪掉，
-`buildNotes` 已經包含這條。）
-
-接著在 `loadFromDir` 之前新增：
-
-```zig
-pub const DifficultyInfo = struct {
-    name: []const u8,
-    level: u8,
-    note_count: usize,
-    max_combo: u32,
-};
-
-/// 選歌畫面要的資訊：歌曲後設資料 + 全部難度的摘要。
-pub const SongInfo = struct {
-    arena: std.heap.ArenaAllocator,
-    title: []const u8,
-    artist: []const u8,
-    audio: []const u8,
-    /// 選歌畫面用不到，但錄製模式（Task 13）需要它才能正確計算譜面時間。
-    offset_ms: i32,
-    bpm: f32,
-    difficulties: []DifficultyInfo,
-
-    pub fn deinit(self: *SongInfo) void {
-        self.arena.deinit();
-    }
-};
-
-/// 純函式。**會驗證每一個難度**——spec §9 要求壞譜面在選歌畫面就被攔下，
-/// 而不是進了遊玩場景才爆。任一難度違反不變量就整首歌失敗。
-pub fn parseInfo(gpa: Allocator, json_bytes: []const u8) ParseError!SongInfo {
-    var arena = std.heap.ArenaAllocator.init(gpa);
-    errdefer arena.deinit();
-    const a = arena.allocator();
-
-    const raw = std.json.parseFromSliceLeaky(RawSong, a, json_bytes, .{
-        .ignore_unknown_fields = true,
-        // 必須指定。預設的 .alloc_if_needed 會讓「沒有轉義字元」的字串成為
-        // 指向 json_bytes 的切片而非 arena 複本——而 loadFromDir 讀完檔就會
-        // 釋放那個 buffer，於是 title/artist/audio 全部變成 use-after-free。
-        // 純函式測試永遠抓不到這個（它們的位元組還活著），只有走檔案的路徑會炸。
-        .allocate = .alloc_always,
-    }) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => return error.InvalidJson,
-    };
-
-    if (raw.format != format_version) return error.UnsupportedFormat;
-    if (raw.difficulties.len == 0) return error.NoSuchDifficulty;
-
-    const diffs = try a.alloc(DifficultyInfo, raw.difficulties.len);
-    for (raw.difficulties, 0..) |d, i| {
-        const notes = try buildNotes(a, d.notes);
-        var mc: u32 = 0;
-        for (notes) |n| mc += n.comboCount();
-        diffs[i] = .{
-            .name = d.name,
-            .level = d.level,
-            .note_count = notes.len,
-            .max_combo = mc,
-        };
-    }
-
-    return .{
-        .arena = arena,
-        .title = raw.title,
-        .artist = raw.artist,
-        .audio = raw.audio,
-        .offset_ms = raw.offset_ms,
-        .bpm = raw.bpm,
-        .difficulties = diffs,
-    };
-}
-
-pub fn loadInfoFromDir(gpa: Allocator, io: std.Io, dir: std.Io.Dir) LoadError!SongInfo {
-    const bytes = try dir.readFileAlloc(io, "song.json", gpa, .limited(4 << 20));
-    defer gpa.free(bytes);
-    return parseInfo(gpa, bytes);
-}
-```
-
-- [ ] **Step 4: 跑測試確認通過**
-
-Run: `zig build test`
-Expected: PASS（chart 測試增加到 31 個；原有的 parse 測試必須全部還在綠燈，
-因為 `buildNotes` 的重構不該改變任何行為）
-
-- [ ] **Step 5: 把 SongRef 加進 transition.zig**
-
-整檔取代 `src/transition.zig`：
-
-```zig
-//! 場景轉換協定。
-//!
-//! 場景的 update 回傳意圖，不自己切換、也不釋放別人的資源——
-//! 資源生命週期全部集中在 main 的轉換處理裡（spec §7）。
-
-const std = @import("std");
-const core = @import("rhythm_game");
-
-/// 指向一首歌的某個難度。
-///
-/// 路徑以固定陣列**按值**攜帶，不是切片：select 場景的 arena 擁有它掃出來的
-/// 字串，而 main 會在進入 play 之前先 deinit select——用切片會懸空。
-pub const SongRef = struct {
-    pub const max_path = 256;
-
-    buf: [max_path]u8 = @splat(0),
-    len: usize = 0,
-    difficulty: usize = 0,
-
-    pub fn init(dir_path: []const u8, difficulty: usize) SongRef {
-        const n = @min(dir_path.len, max_path);
-        var r: SongRef = .{ .len = n, .difficulty = difficulty };
-        @memcpy(r.buf[0..n], dir_path[0..n]);
-        return r;
-    }
-
-    pub fn path(self: *const SongRef) []const u8 {
-        return self.buf[0..self.len];
-    }
-};
-
-pub const Transition = union(enum) {
-    stay,
-    to_play: SongRef,
-    to_result: core.scoring.Summary,
-    to_select,
-    quit,
-};
-
-test "SongRef 按值攜帶路徑" {
-    const r = SongRef.init("charts/01-metronome", 2);
-    try std.testing.expectEqualStrings("charts/01-metronome", r.path());
-    try std.testing.expectEqual(@as(usize, 2), r.difficulty);
-}
-```
-
-- [ ] **Step 6: 寫 select 場景**
-
-Create `src/scene/select.zig`：
-
-```zig
-//! 選歌場景。掃 charts/ 下的子目錄，列出歌曲與難度。
-//!
-//! 載入失敗的譜面標示為不可選並顯示原因——絕不帶進遊玩場景才爆（spec §9）。
-
-const std = @import("std");
-const rl = @import("raylib");
-const core = @import("rhythm_game");
-const transition = @import("../transition.zig");
-
-const Allocator = std.mem.Allocator;
-
-const charts_root = "charts";
-
-const Entry = struct {
-    /// arena 擁有。
-    dir_name: []const u8,
-    /// null = 載入失敗。
-    info: ?core.chart.SongInfo,
-    /// 失敗原因（@errorName），成功時為空字串。
-    err_name: []const u8,
-};
-
-pub const Select = struct {
-    gpa: Allocator,
-    arena: std.heap.ArenaAllocator,
-    entries: []Entry,
-    song: usize = 0,
-    diff: usize = 0,
-
-    /// 就地初始化（與 Play 一致，避免搬移後指標失效的意外）。
-    pub fn init(self: *Select, gpa: Allocator, io: std.Io) !void {
-        self.gpa = gpa;
-        self.arena = std.heap.ArenaAllocator.init(gpa);
-        errdefer self.arena.deinit();
-        const a = self.arena.allocator();
-
-        var list: std.ArrayList(Entry) = .empty;
-
-        var root = std.Io.Dir.cwd().openDir(io, charts_root, .{ .iterate = true }) catch {
-            // charts/ 不存在就是空清單，不是崩潰（spec §9）。
-            self.entries = &.{};
-            self.song = 0;
-            self.diff = 0;
-            return;
-        };
-        defer root.close(io);
-
-        var it = root.iterate();
-        while (try it.next(io)) |ent| {
-            if (ent.kind != .directory) continue;
-
-            const name = try a.dupe(u8, ent.name);
-            var song_dir = root.openDir(io, name, .{}) catch |err| {
-                try list.append(a, .{
-                    .dir_name = name,
-                    .info = null,
-                    .err_name = @errorName(err),
-                });
-                continue;
-            };
-            defer song_dir.close(io);
-
-            if (core.chart.loadInfoFromDir(gpa, io, song_dir)) |info| {
-                // SongInfo 自帶 arena，按值移進 Entry，由 Select.deinit 釋放。
-                try list.append(a, .{ .dir_name = name, .info = info, .err_name = "" });
-            } else |err| {
-                try list.append(a, .{
-                    .dir_name = name,
-                    .info = null,
-                    .err_name = @errorName(err),
-                });
-            }
-        }
-
-        std.mem.sort(Entry, list.items, {}, lessByName);
-        self.entries = list.items;
-        self.song = 0;
-        self.diff = 0;
-    }
-
-    fn lessByName(_: void, x: Entry, y: Entry) bool {
-        return std.mem.lessThan(u8, x.dir_name, y.dir_name);
-    }
-
-    pub fn deinit(self: *Select) void {
-        for (self.entries) |*e| {
-            if (e.info) |*info| info.deinit();
-        }
-        self.arena.deinit();
-        self.* = undefined;
-    }
-
-    fn current(self: *const Select) ?*const Entry {
-        if (self.song >= self.entries.len) return null;
-        return &self.entries[self.song];
-    }
-
-    pub fn update(self: *Select) transition.Transition {
-        if (rl.isKeyPressed(.escape)) return .quit;
-        if (self.entries.len == 0) return .stay;
-
-        if (rl.isKeyPressed(.down)) {
-            self.song = (self.song + 1) % self.entries.len;
-            self.diff = 0;
-        }
-        if (rl.isKeyPressed(.up)) {
-            self.song = (self.song + self.entries.len - 1) % self.entries.len;
-            self.diff = 0;
-        }
-
-        const e = self.current() orelse return .stay;
-        if (e.info) |info| {
-            if (rl.isKeyPressed(.right)) {
-                self.diff = (self.diff + 1) % info.difficulties.len;
-            }
-            if (rl.isKeyPressed(.left)) {
-                self.diff = (self.diff + info.difficulties.len - 1) % info.difficulties.len;
-            }
-            if (rl.isKeyPressed(.enter)) {
-                var buf: [transition.SongRef.max_path]u8 = undefined;
-                const p = std.fmt.bufPrint(
-                    &buf,
-                    "{s}/{s}",
-                    .{ charts_root, e.dir_name },
-                ) catch return .stay;
-                return .{ .to_play = transition.SongRef.init(p, self.diff) };
-            }
-        }
-        return .stay;
-    }
-
-    pub fn draw(self: *const Select) void {
-        rl.drawText("SELECT SONG", 40, 32, 28, .ray_white);
-
-        if (self.entries.len == 0) {
-            rl.drawText(
-                "charts/ 下沒有任何譜面。",
-                40,
-                90,
-                20,
-                .{ .r = 220, .g = 180, .b = 120, .a = 255 },
-            );
-            rl.drawText(
-                "跑 python3 tools/make_metronome.py 產生測試素材。",
-                40,
-                120,
-                20,
-                .{ .r = 150, .g = 150, .b = 160, .a = 255 },
-            );
-            return;
-        }
-
-        var y: i32 = 90;
-        for (self.entries, 0..) |e, i| {
-            const selected = i == self.song;
-            var buf: [256]u8 = undefined;
-
-            if (e.info) |info| {
-                const line = std.fmt.bufPrintZ(
-                    &buf,
-                    "{s}{s} — {s}",
-                    .{ if (selected) "> " else "  ", info.title, info.artist },
-                ) catch "?";
-                rl.drawText(line, 40, y, 22, if (selected)
-                    .{ .r = 255, .g = 240, .b = 180, .a = 255 }
-                else
-                    .ray_white);
-            } else {
-                const line = std.fmt.bufPrintZ(
-                    &buf,
-                    "{s}{s} — 無法載入：{s}",
-                    .{ if (selected) "> " else "  ", e.dir_name, e.err_name },
-                ) catch "?";
-                rl.drawText(line, 40, y, 22, .{ .r = 220, .g = 90, .b = 90, .a = 255 });
-            }
-            y += 30;
-        }
-
-        const e = self.current() orelse return;
-        if (e.info) |info| {
-            y += 20;
-            for (info.difficulties, 0..) |d, i| {
-                var buf: [128]u8 = undefined;
-                const line = std.fmt.bufPrintZ(&buf, "{s}{s} Lv.{d}  ({d} notes / {d} combo)", .{
-                    if (i == self.diff) "> " else "  ",
-                    d.name,
-                    d.level,
-                    d.note_count,
-                    d.max_combo,
-                }) catch "?";
-                rl.drawText(line, 60, y, 20, if (i == self.diff)
-                    .{ .r = 150, .g = 230, .b = 255, .a = 255 }
-                else
-                    .{ .r = 150, .g = 150, .b = 160, .a = 255 });
-                y += 26;
-            }
-            rl.drawText(
-                "↑↓ 選歌   ←→ 選難度   Enter 開始   Esc 離開",
-                40,
-                y + 24,
-                18,
-                .{ .r = 120, .g = 125, .b = 140, .a = 255 },
-            );
-        }
-    }
-};
-```
-
-- [ ] **Step 7: 寫 result 場景**
-
-Create `src/scene/result.zig`：
-
-```zig
-//! 結算場景。顯示達成率、各判定級別數量、最大 combo。
-//!
-//! 各級別數量只統計時機判定——slider 的覆蓋 tick 沒有級別意義（spec §6）。
-
-const std = @import("std");
-const rl = @import("raylib");
-const core = @import("rhythm_game");
-const transition = @import("../transition.zig");
-
-pub const Result = struct {
-    summary: core.scoring.Summary,
-    /// 重試用。按值存，不依賴 select 場景還活著。
-    song: transition.SongRef,
-
-    pub fn init(summary: core.scoring.Summary, song: transition.SongRef) Result {
-        return .{ .summary = summary, .song = song };
-    }
-
-    pub fn update(self: *Result) transition.Transition {
-        if (rl.isKeyPressed(.enter)) return .{ .to_play = self.song };
-        if (rl.isKeyPressed(.escape)) return .to_select;
-        return .stay;
-    }
-
-    pub fn draw(self: *const Result) void {
-        const s = self.summary;
-        var buf: [160]u8 = undefined;
-
-        rl.drawText("RESULT", 40, 32, 28, .{ .r = 150, .g = 150, .b = 160, .a = 255 });
-
-        const acc = std.fmt.bufPrintZ(&buf, "{d:.2}%", .{s.achievement}) catch "?";
-        rl.drawText(acc, 40, 80, 72, .{ .r = 255, .g = 240, .b = 180, .a = 255 });
-
-        var b2: [160]u8 = undefined;
-        const counts = std.fmt.bufPrintZ(
-            &b2,
-            "PERFECT {d}   GREAT {d}   GOOD {d}   MISS {d}",
-            .{ s.perfect, s.great, s.good, s.miss },
-        ) catch "?";
-        rl.drawText(counts, 40, 180, 22, .ray_white);
-
-        var b3: [160]u8 = undefined;
-        const combo = std.fmt.bufPrintZ(
-            &b3,
-            "MAX COMBO {d} / {d:.0}",
-            .{ s.max_combo, s.total },
-        ) catch "?";
-        rl.drawText(combo, 40, 214, 22, .ray_white);
-
-        rl.drawText(
-            "Enter 重試   Esc 回選歌",
-            40,
-            270,
-            18,
-            .{ .r = 120, .g = 125, .b = 140, .a = 255 },
-        );
-    }
-};
-```
-
-- [ ] **Step 8: 把 main 改成三場景的狀態機**
-
-Modify `src/main.zig`：import 區改成
-
-```zig
-const std = @import("std");
-const rl = @import("raylib");
-const core = @import("rhythm_game");
-const transition = @import("transition.zig");
-const input = @import("input.zig");
-const render = @import("render.zig");
-const select_scene = @import("scene/select.zig");
-const play_scene = @import("scene/play.zig");
-const result_scene = @import("scene/result.zig");
-```
-
-把 `rl.hideCursor();` 之後整段換成：
-
-```zig
-    // 三個場景各自是一個區域變數，不放在 union 裡：Play 持有 &self.chart，
-    // 切換 union variant 會覆寫掉它所指向的記憶體。
-    var active: enum { select, play, result } = .select;
-    var select_s: select_scene.Select = undefined;
-    var play_s: play_scene.Play = undefined;
-    var result_s: result_scene.Result = undefined;
-    var current_song: transition.SongRef = .{};
-
-    try select_s.init(init.gpa, init.io);
-    defer switch (active) {
-        .select => select_s.deinit(),
-        .play => play_s.deinit(),
-        .result => {},
-    };
-
-    while (!rl.windowShouldClose()) {
-        const t: transition.Transition = switch (active) {
-            .select => select_s.update(),
-            .play => play_s.update(),
-            .result => result_s.update(),
-        };
-
-        switch (t) {
-            .stay => {},
-            .quit => break,
-            .to_play => |ref| {
-                switch (active) {
-                    .select => select_s.deinit(),
-                    .play => play_s.deinit(),
-                    .result => {},
-                }
-                current_song = ref;
-                play_s.init(init.gpa, init.io, ref.path(), ref.difficulty) catch |err| {
-                    // 不該發生——選歌畫面已經驗證過譜面（spec §9）。
-                    // 真的發生就退回選歌，不要讓程式死在這裡。
-                    std.debug.print("無法載入 {s}: {s}\n", .{ ref.path(), @errorName(err) });
-                    try select_s.init(init.gpa, init.io);
-                    active = .select;
-                    continue;
-                };
-                active = .play;
-            },
-            .to_result => |summary| {
-                play_s.deinit();
-                result_s = result_scene.Result.init(summary, current_song);
-                active = .result;
-            },
-            .to_select => {
-                switch (active) {
-                    .select => {},
-                    .play => play_s.deinit(),
-                    .result => {},
-                }
-                try select_s.init(init.gpa, init.io);
-                active = .select;
-            },
-        }
-
-        rl.beginDrawing();
-        defer rl.endDrawing();
-        rl.clearBackground(.{ .r = 12, .g = 14, .b = 20, .a = 255 });
-        switch (active) {
-            .select => select_s.draw(),
-            .play => play_s.draw(),
-            .result => result_s.draw(),
-        }
-    }
-```
-
-- [ ] **Step 9: 跑測試確認通過**
-
-Run: `zig build test`
-Expected: PASS（新增 transition 的 1 個測試）
-
-- [ ] **Step 10: 跑完整迴圈**
-
-Run: `zig build run`
-
-逐項確認：
-
-1. 開場是選歌畫面，列出 `Metronome 120 — tools/make_metronome.py`
-2. 下方顯示難度 `TEST Lv.1 (11 notes / 19 combo)`
-3. Enter 進入遊玩，音樂開始播
-4. 打完最後一個 note 自動進結算，顯示達成率、各級別數量、`MAX COMBO n / 19`
-5. 結算按 Enter 重試同一首歌（音樂從頭開始）
-6. 結算按 Esc 回選歌
-7. 遊玩中按 Esc 回選歌
-8. 選歌按 Esc 離開程式
-9. 重試好幾次不會洩漏記憶體也不會崩潰（Debug build 會在 deinit 時檢查）
-
-**壞譜面的處理也要驗**：
-
-Run: `mkdir -p charts/99-broken && echo '{"format":1,"title":"B","artist":"","audio":"x.wav","offset_ms":0,"bpm":120,"difficulties":[{"name":"X","level":1,"notes":[{"t":0,"type":"center"},{"t":50,"type":"center"}]}]}' > charts/99-broken/song.json && zig build run`
-
-Expected: 選歌畫面出現紅色的 `99-broken — 無法載入：OverlappingNotes`，
-而且**選不進去**（按 Enter 沒反應）。
-
-驗證完 `rm -rf charts/99-broken`。
-
-- [ ] **Step 11: Commit**
-
-```bash
-git add src/chart.zig src/transition.zig src/scene/select.zig src/scene/result.zig src/main.zig
-git commit -m "feat: complete select to play to result loop
-
-parseInfo 驗證每一個難度，所以壞譜面在選歌畫面就被標成不可選並顯示原因，
-不會帶進遊玩場景才爆（spec §9）。它與 parse 共用 buildNotes，兩邊的
-不變量一定一致。
-
-SongRef 以固定陣列按值攜帶路徑：select 的 arena 擁有它掃出來的字串，而
-main 會在進入 play 之前先 deinit select——用切片會懸空。
-
-三個場景是各自的區域變數而不是 union：Play 持有 &self.chart，切換 union
-variant 會覆寫它所指向的記憶體。"
-```
-
----
+### Task 10: layout / input / render — 已實作（2026-10-11）
+
+以 spec §7 的繪圖介面為準。原計畫範例在 render 內計算半徑、角度並呼叫
+judge，已由下列實作取代；後續請使用原始碼的介面，勿恢復舊範例。
+
+- [x] 寫 layout 的 8 個初始測試並登記 root；確認缺少 Layout 等宣告時編譯失敗。
+- [x] 實作 layout，增加 5 個幾何測試；共 13 個 layout 測試通過。
+- [x] input 輪詢 Z／X 的 held／presses 與滑鼠分區。
+- [x] render 繪製舞台、游標與 note；所有座標計算委派給 layout。
+- [x] main 接入舞台、游標與區域／按鍵除錯文字。
+- [x] 完整測試 112/112（核心 108、exe 4）及 Debug 建置通過。
+- [x] 整理以下 PENDING-HUMAN 清單。
+- [ ] 人工畫面驗收。
+- [ ] Commit（本次尚未提交，包含前次文件同步的工作目錄變更）。
+
+**交付檔案與介面：**
+
+- `src/layout.zig`：`Layout`、`Point`、`Ring`、`Circle`、`Line`、`Shape`、
+  `NoteGeometry`；`cellAngle`、`ringDegrees`、`noteRadiusFrac`、`arcRing`、
+  `circle`、`stageTick`、`cursorShape`、`noteGeometry`。
+- `src/input.zig`：`trigger_keys`、`Frame { zone, key_held, presses }`、`poll`。
+- `src/render.zig`：`currentLayout`、`drawStage`、`drawArc`、`drawCursor`、
+  `drawNote(l, note, chart_time_ms, tracking_arc: ?core.geom.Arc)`。
+- `src/root.zig` 匯出 layout；`src/constants.zig` 集中視覺厚度與刻度常數；
+  `src/main.zig` 執行輸入／繪圖迴圈。note 入口強制編譯分析，尚未接歌曲。
+
+**驗證範圍：**
+
+座標閉環含 64 格、正方形／橫式／直式畫面，以及實際傳給 raylib 的扇形中心角；
+另測四方位、前緣與中心差半格、63 → 0 跨接縫、滿圈、非負半徑、飛行端點、
+中央提示圈與場景提供的 slider 追蹤目標。render／layout 不依賴 judge。
+
+**PENDING-HUMAN（未執行開窗）：**
+
+1. 畫面中央有中央判定圈、死區外緣細線、判定圈。
+2. 滑鼠移到環上時判定圈出現一格高亮，且跟著滑鼠轉。
+3. 滑鼠移到正上方時顯示 `ring cell 0`。
+4. 順時針轉動時編號遞增：0 → 16（右）→ 32（下）→ 48（左）。
+5. 滑鼠在正中央顯示 `CENTER`，中央圈外框變亮。
+6. 在中央圈與死區外緣之間顯示 `outside (dead zone)`，無任何高亮。
+7. 滑鼠在畫面角落仍顯示 ring cell（ring 區無外緣上限）。
+8. 按住 Z 或 X 時 `held=true`；按下時 presses 增加，兩鍵都要試。
+
+數學測試不取代 raylib 呈現、實機输入與視窗驗收。note 與歌曲接線、音訊同步
+及特效 pool 留到 Task 11。
+
+### Task 11: scene/play — 已實作（2026-10-11）
+
+現行介面以 spec §7 與 `src/scene/play.zig` 為準；原範例已由實作取代。
+
+- [x] Play 就地初始化，main 擁有其生命週期，失敗路徑釋放已取得的資源。
+- [x] 音訊 stream、SongClock、offset、輸入、judge 與 scoring 接線。
+- [x] 64 格特效 pool、HUD、滑動可見窗口；繪圖與座標數學分別留在 render／layout。
+- [x] 關閉音訊 looping；自然播畢保留錨點；譜面判完且尾段時間結束才結算。
+- [x] 時間倒退／事件溢出回傳 error，由 main 中止當局，不當成正常結算。
+- [x] Esc 由場景回傳 to_select；Task 11 的 main 暫時退出，Task 12 才接回選歌。
+- [x] 注入 10ms 台階音訊時鐘與獨立單調時間，正負 offset、60／120／240 FPS 全曲測試。
+- [x] 部分得分與全 MISS 整合測試，另補特效位置／擴散／淡出的純幾何測試。
+- [x] 117/117 測試通過（核心 113、exe 4），Debug 建置通過；audio.wav 存在。
+- [ ] PENDING-HUMAN：下列音訊、操作與畫面驗收。
+- [ ] Commit（本次尚未提交）。
+
+**介面與行為：**
+
+- `Play.init(*Play, gpa, io, song_dir, difficulty) !void`、`deinit()`、
+  `update() error{ClockMovedBackwards, JudgementOverflow}!Transition`、`draw()`。
+- `SongClock.chartTimeMs(offset_ms)`：場景與離線整合測試共用音訊 → 譜面時間換算。
+- `layout.effectPoint` / `effectGeometry`：環上 arc 中點、中央點、擴散與 alpha。
+- `render.Effect` / `drawEffects` / `drawHud`：唯讀特效與計分顯示，不依賴 judge。
+- `src/integration_test.zig`：由 root 的 test 區塊匯入，不連結 raylib。
+- `zig build run` 直接播放 `charts/01-metronome` 難度 0；尾段結束時印結算並退出。
+  新 checkout 若缺 WAV，先跑 `python3 tools/make_metronome.py`。
+
+**PENDING-HUMAN（未執行開窗）：**
+
+1. 聽到 120 BPM 節拍器，每四拍一次重音；分別使用預設 240 與 `--fps=60|120`。
+2. note 由中心飛到判定圈，命中後消失；center 提示在中央。
+3. 第一顆 tap 精準命中時 combo 1、達成率 4.17%（全曲分母 24）；全曲全中才是
+   100.00%、PERFECT 13、MAX COMBO 24。
+4. 三條 slider 分別順時針、逆時針、跨 63 → 0 接縫；按住 Z 或 X 追蹤時覆蓋 tick
+   逐次計分，特效出現在對應 tick 的位置。兩個 center note 可在中央命中。
+5. 故意 MISS 顯示紅色特效、combo 歸零；全程不輸入最終 0%、MISS 13、MAX COMBO 0。
+   達成率分母固定，不會因一次 MISS 而倒扣已累積的分數。
+6. 最後 note 判完後保留尾段，特效有時間淡出，再印結算並結束。
+7. Esc 及關閉視窗均退出並停止音訊；自然播畢不重播、不因音訊時間歸零報倒退。
+8. 缺少／損毀音訊與音訊裝置不可用時，顯示載入錯誤並退出，不進入遊玩。
+9. 裝置中斷恢復造成時間倒退、或嚴重卡頓造成事件溢出時，印中止原因，不印正常結算。
+
+離線整合測試驗證的是核心的時鐘／判定／計分鏈；不代表 raylib 音訊延遲、
+裝置恢復、場景接線、輸入手感或資源釋放已經實機驗收。
+
+### Task 12: scene/select 與 scene/result — 已實作（2026-10-11）
+
+- [x] `chart.parseInfo`／`loadInfoFromDir` 與 `SongInfo`／`DifficultyInfo`；
+  與 parse 共用 parseRaw、buildNotes，每個難度均通過相同驗證。
+- [x] 檔案讀取、metadata 所有權、後續難度失敗、空難度清單與配置失敗清理測試。
+- [x] `SongRef` 按值攜帶路徑與難度；過長回傳 error，不截斷。複製與長度邊界有測試。
+- [x] Select 掃描並排序 charts/；音檔可讀性與 stream 試載入，失敗項目禁用並顯示原因。
+- [x] 歌曲／難度清單分頁，維持目前選項可見；繪圖在 render，場景只處理輸入與資料。
+- [x] Result 顯示兩位達成率、各級別數量、最大 combo／滿分；Enter 重試、Esc 返回。
+- [x] main 完成三場景循環。轉換期間 active=none，避免目標初始化失敗時重複清理。
+- [x] 128/128 測試（核心 122、exe 6）與 Debug 建置通過。
+- [ ] PENDING-HUMAN：完整循環、音訊、顯示與錯誤處理實機驗收。
+- [ ] Commit（尚未提交，工作目錄包含前面 task 的變更）。
+
+**介面：**
+
+- `SongRef.init(path, difficulty) error{SongPathTooLong}!SongRef`、`path()`。
+- `Select.init(*Select, gpa, io) !void`、`deinit()`、`update() Transition`、`draw()`。
+- `Result.init(summary, song) Result`、`update() Transition`、`draw()`。
+- `render.SongRow`、`drawSelect`、`drawResult`；場景不自己畫圖。
+
+**PENDING-HUMAN（不在本環境開窗）：**
+
+1. 開場選歌列出 Metronome 120，TEST Lv.1（13 notes / 24 combo）。
+2. ↑↓ 切歌曲、←→ 切難度；超過 10 首／4 難度時目前選项仍可見。
+3. Enter 進遊玩、音樂開始；完成尾段後進結算，顯示兩位達成率及 MAX COMBO n / 24。
+4. 結算 Enter 從頭重試相同歌曲／難度，Esc 回選歌；遊玩 Esc 回選歌，音訊停止。
+5. 選歌 Esc 退出；各場景關閉視窗皆正常釋放。多次重試／返回不崩潰，需實測資源使用。
+6. 在可開窗機器的獨立測試目錄準備重疊 note、第二難度非法、缺少或損毀音訊：
+   選歌顯示原因且 Enter 無法開始，不要覆蓋正式素材。
+7. charts/ 缺失或空時顯示空清單；目錄無法讀取時顯示真正的錯誤。
+8. 選歌後刪除音檔或改壞譜面，再 Enter／重試：返回選歌並顯示失敗原因，無正常結算。
+9. 超過 256 bytes 的歌曲路徑禁用，顯示 SongPathTooLong，不能截斷後播放另一條路徑。
+10. 操作標籤採 ASCII；非拉丁歌名在 raylib 預設字型下可能缺字，需人工確認顯示限制。
+
+自動測試涵蓋純解析、所有權與核心遊玩鏈，不涵蓋 raylib／場景接線。未宣稱
+上述人工作業已完成。Task 13 的錄製模式仍待實作。
 
 ### Task 13: recorder — 錄製模式
 
@@ -5300,8 +3875,8 @@ git commit -m "feat: add recording mode for bootstrapping charts
 |---|---|
 | §1 目標與範圍 | 全部。`--fps` 在 Task 9；`calibration_ms` 固定 0 在 Task 6；明確不做的項目不出現在任何 task |
 | §2 玩法與輸入模型（游標分區、單線程、兩鍵等效） | Task 2（`zoneAt`、ring 無外緣）、Task 3（單線程不變量）、Task 10（兩個觸發鍵） |
-| §3 模組切分（三條界線由 build graph 強制） | Task 1（root 匯出 + Step 6 實際驗證純核心無法 import raylib） |
-| §4 資料模型（`Cell = u6`、`sweep: i8`、六條不變量、檔案格式） | Task 3（型別 + parse + 全部不變量）、Task 4（serialize） |
+| §3 模組切分（純核心／raylib 界線由 build graph 強制；內部依賴由 review 維護） | Task 1（root 匯出 + Step 6 實際驗證純核心無法 import raylib） |
+| §4 資料模型（`Cell = u6`、`sweep: i8`、八條不變量、檔案格式） | Task 3（型別 + parse + 全部不變量）、Task 4（serialize） |
 | §5 SongClock（錨點 + 插值 + 平滑 + 硬重置） | Task 6 |
 | §6 判定與計分（時間窗、角度容錯、時間基準、slider tick、計分 combo 合一、幀率） | Task 7（判定）、Task 8（計分 + 整合測試）、Task 9（`--fps`）、Task 11（`chartTimeMs`） |
 | §7 場景與渲染（`Transition`、資源生命週期、環形繪圖、游標高亮、特效 pool、隱藏系統游標） | Task 9（`Transition`、`hideCursor`）、Task 10（繪圖）、Task 11（特效 pool）、Task 12（三場景狀態機） |

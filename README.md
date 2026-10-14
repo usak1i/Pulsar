@@ -4,8 +4,10 @@
 
 Zig 0.16 + [raylib-zig](https://github.com/raylib-zig/raylib-zig) 6.0.0，目標平台 PC。
 
-> **狀態：設計完成，實作尚未開始。**
-> 目前的 `src/` 只有 `zig init` 的骨架加上一個開窗的 raylib 範例。
+> **狀態（2026-10-11）：選歌／遊玩／結算循環已實作，實機驗收待完成。**
+> Task 1–8 的譜面、幾何、時鐘、判定與計分已落地；Task 9 已有 `--fps` 與視窗骨架。
+> Task 12 已接上選歌、難度切換、結算、重試與返回；下一步 Task 13 是錄製模式。
+> 本次驗證：128/128 測試與 Debug 建置通過。畫面、音訊與操作驗收為 PENDING-HUMAN。
 > 設計見 [spec](docs/superpowers/specs/2026-10-04-rhythm-game-core-design.md)，
 > 實作步驟見 [plan](docs/superpowers/plans/)。
 
@@ -50,6 +52,16 @@ zig build run -- --fps=120      # 指定幀率：60 | 120 | 240（預設 240）
 zig build test                  # 跑測試
 zig build -Doptimize=ReleaseFast
 ```
+
+`zig build run` 進入選歌：↑↓ 選歌、←→ 選難度、Enter 開始。遊玩 Esc 回選歌；
+結算 Enter 重試、Esc 回選歌；選歌 Esc 退出。壞譜面／音檔會顯示原因並禁用。
+音檔不入版控，新 checkout 若缺少 WAV，先跑：
+
+```sh
+python3 tools/make_metronome.py
+```
+
+此開發環境無法建立視窗；畫面、音訊同步與手感均為 **PENDING-HUMAN**。
 
 ### 為什麼有 `--fps`
 
@@ -110,11 +122,12 @@ charts/
 
 | 模組 | root | raylib | 內容 |
 |---|---|---|---|
-| `rhythm_game` | `src/root.zig` | 否 | `constants` `geom` `chart` `clock` `judge` `scoring` |
+| `rhythm_game` | `src/root.zig` | 否 | `constants` `geom` `layout` `chart` `clock` `judge` `scoring` |
 | exe | `src/main.zig` | 是 | `input` `render` `recorder` `scene/` |
 
 副作用是純核心的測試不需要視窗也不需要音效卡——整首歌可以在測試裡用腳本化的
-輸入打完，斷言達成率與 combo。
+輸入打完，斷言達成率與 combo。另有注入 SongClock 與正負 offset_ms
+的全曲整合測試，涵蓋三種幀率、部分得分與全 MISS。
 
 ## 文件
 

@@ -139,30 +139,11 @@ pub fn parse(gpa: Allocator, json_bytes: []const u8, difficulty: usize) ParseErr
     errdefer arena.deinit();
     const a = arena.allocator();
 
-    const raw = std.json.parseFromSliceLeaky(RawSong, a, json_bytes, .{
-        .ignore_unknown_fields = true,
-        // 必須指定。預設的 .alloc_if_needed 會讓「沒有轉義字元」的字串成為
-        // 指向 json_bytes 的切片而非 arena 複本——而 loadFromDir 讀完檔就會
-        // 釋放那個 buffer，於是 title/artist/audio 全部變成 use-after-free。
-        // 純函式測試永遠抓不到這個（它們的位元組還活著），只有走檔案的路徑會炸。
-        .allocate = .alloc_always,
-    }) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => return error.InvalidJson,
-    };
-
-    if (raw.format != format_version) return error.UnsupportedFormat;
+    const raw = try parseRaw(a, json_bytes);
     if (difficulty >= raw.difficulties.len) return error.NoSuchDifficulty;
 
     const diff = raw.difficulties[difficulty];
-    if (diff.notes.len == 0) return error.EmptyChart;
-
-    const notes = try a.alloc(Note, diff.notes.len);
-    for (diff.notes, 0..) |rn, i| notes[i] = try convertNote(rn);
-
-    // 不信任檔案裡的順序。
-    std.mem.sort(Note, notes, {}, lessByTime);
-    try checkNoOverlap(notes);
+    const notes = try buildNotes(a, diff.notes);
 
     var max_combo: u32 = 0;
     var last_end: i32 = std.math.minInt(i32);
@@ -184,6 +165,32 @@ pub fn parse(gpa: Allocator, json_bytes: []const u8, difficulty: usize) ParseErr
         .duration_ms = last_end + c.chart_tail_padding_ms,
         .max_combo = max_combo,
     };
+}
+
+fn parseRaw(a: Allocator, json_bytes: []const u8) ParseError!RawSong {
+    const raw = std.json.parseFromSliceLeaky(RawSong, a, json_bytes, .{
+        .ignore_unknown_fields = true,
+        // 必須指定。預設的 .alloc_if_needed 會讓「沒有轉義字元」的字串成為
+        // 指向 json_bytes 的切片而非 arena 複本——而 loadFromDir 讀完檔就會
+        // 釋放那個 buffer，於是 title/artist/audio 全部變成 use-after-free。
+        // 純函式測試永遠抓不到這個（它們的位元組還活著），只有走檔案的路徑會炸。
+        .allocate = .alloc_always,
+    }) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.InvalidJson,
+    };
+
+    if (raw.format != format_version) return error.UnsupportedFormat;
+    return raw;
+}
+
+fn buildNotes(a: Allocator, raw: []const RawNote) ParseError![]Note {
+    if (raw.len == 0) return error.EmptyChart;
+    const notes = try a.alloc(Note, raw.len);
+    for (raw, 0..) |rn, i| notes[i] = try convertNote(rn);
+    std.mem.sort(Note, notes, {}, lessByTime);
+    try checkNoOverlap(notes);
+    return notes;
 }
 
 fn lessByTime(_: void, x: Note, y: Note) bool {
@@ -787,4 +794,205 @@ test "節拍器譜面檔案（charts/01-metronome/song.json）與內嵌測試同
     try std.testing.expectEqual(@as(c.Cell, 62), ch.notes[11].kind.tap.cell);
     try std.testing.expectEqual(@as(c.Cell, 60), ch.notes[12].kind.slider.from.cell);
     try std.testing.expectEqual(@as(i8, 8), ch.notes[12].kind.slider.sweep);
+}
+
+pub const DifficultyInfo = struct {
+    name: []const u8,
+    level: u8,
+    note_count: usize,
+    max_combo: u32,
+};
+
+/// 選歌畫面要的資訊：歌曲後設資料 + 全部難度的摘要。
+pub const SongInfo = struct {
+    arena: std.heap.ArenaAllocator,
+    title: []const u8,
+    artist: []const u8,
+    audio: []const u8,
+    /// 選歌畫面用不到，但錄製模式（Task 13）需要它才能正確計算譜面時間。
+    offset_ms: i32,
+    bpm: f32,
+    difficulties: []DifficultyInfo,
+
+    pub fn deinit(self: *SongInfo) void {
+        self.arena.deinit();
+    }
+};
+
+/// 純函式。**會驗證每一個難度**——spec §9 要求壞譜面在選歌畫面就被攔下，
+/// 而不是進了遊玩場景才爆。任一難度違反不變量就整首歌失敗。
+pub fn parseInfo(gpa: Allocator, json_bytes: []const u8) ParseError!SongInfo {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    errdefer arena.deinit();
+    const a = arena.allocator();
+
+    const raw = try parseRaw(a, json_bytes);
+    if (raw.difficulties.len == 0) return error.NoSuchDifficulty;
+
+    const diffs = try a.alloc(DifficultyInfo, raw.difficulties.len);
+    for (raw.difficulties, 0..) |d, i| {
+        const notes = try buildNotes(a, d.notes);
+        var mc: u32 = 0;
+        for (notes) |n| mc += n.comboCount();
+        diffs[i] = .{
+            .name = d.name,
+            .level = d.level,
+            .note_count = notes.len,
+            .max_combo = mc,
+        };
+    }
+
+    return .{
+        .arena = arena,
+        .title = raw.title,
+        .artist = raw.artist,
+        .audio = raw.audio,
+        .offset_ms = raw.offset_ms,
+        .bpm = raw.bpm,
+        .difficulties = diffs,
+    };
+}
+
+pub fn loadInfoFromDir(gpa: Allocator, io: std.Io, dir: std.Io.Dir) LoadError!SongInfo {
+    const bytes = try dir.readFileAlloc(io, "song.json", gpa, .limited(4 << 20));
+    defer gpa.free(bytes);
+    return parseInfo(gpa, bytes);
+}
+
+test "parseInfo 讀出歌曲與難度清單" {
+    const j =
+        \\{
+        \\  "format": 1, "title": "Two Diffs", "artist": "A",
+        \\  "audio": "a.wav", "offset_ms": 0, "bpm": 150,
+        \\  "difficulties": [
+        \\    { "name": "BASIC", "level": 3, "notes": [
+        \\      { "t": 0, "type": "center" } ]},
+        \\    { "name": "HARD", "level": 9, "notes": [
+        \\      { "t": 0, "type": "center" },
+        \\      { "t": 500, "type": "slider", "cell": 0, "width": 4,
+        \\        "sweep": 8, "dur": 400, "combo": 3 } ]}
+        \\  ]
+        \\}
+    ;
+    var info = try parseInfo(std.testing.allocator, j);
+    defer info.deinit();
+
+    try std.testing.expectEqualStrings("Two Diffs", info.title);
+    try std.testing.expectEqualStrings("a.wav", info.audio);
+    try std.testing.expectEqual(@as(i32, 0), info.offset_ms);
+    try std.testing.expectEqual(@as(usize, 2), info.difficulties.len);
+
+    try std.testing.expectEqualStrings("BASIC", info.difficulties[0].name);
+    try std.testing.expectEqual(@as(u32, 1), info.difficulties[0].max_combo);
+
+    try std.testing.expectEqualStrings("HARD", info.difficulties[1].name);
+    try std.testing.expectEqual(@as(usize, 2), info.difficulties[1].note_count);
+    try std.testing.expectEqual(@as(u32, 4), info.difficulties[1].max_combo); // 1 + 3
+}
+
+test "parseInfo 驗證每個難度——任一難度壞掉就整首歌失敗" {
+    // 第二個難度的兩個 note 判定區間重疊
+    const j =
+        \\{
+        \\  "format": 1, "title": "T", "artist": "A",
+        \\  "audio": "a.wav", "offset_ms": 0, "bpm": 150,
+        \\  "difficulties": [
+        \\    { "name": "OK", "level": 1, "notes": [
+        \\      { "t": 0, "type": "center" } ]},
+        \\    { "name": "BAD", "level": 9, "notes": [
+        \\      { "t": 0, "type": "center" },
+        \\      { "t": 100, "type": "center" } ]}
+        \\  ]
+        \\}
+    ;
+    try std.testing.expectError(
+        error.OverlappingNotes,
+        parseInfo(std.testing.allocator, j),
+    );
+}
+
+test "loadFromDir 端對端：讀檔後釋放 buffer，字串仍然有效" {
+    // 這是 Task 3 的 Critical bug 唯一能被直接抓到的形狀。parse 的純函式測試
+    // 永遠看不見它——那些測試的輸入位元組還活著，所以「字串指向輸入 buffer」
+    // 這件事完全無害。只有走完「讀檔 → parse → 釋放 buffer」整條路才會現形。
+    const t_io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(t_io, .{ .sub_path = "song.json", .data = test_json });
+
+    var ch = try loadFromDir(std.testing.allocator, t_io, tmp.dir, 0);
+    defer ch.deinit();
+
+    // loadFromDir 內部的 defer gpa.free(bytes) 此時已經執行過了。
+    try std.testing.expectEqualStrings("Example", ch.title);
+    try std.testing.expectEqualStrings("Someone", ch.artist);
+    try std.testing.expectEqualStrings("audio.wav", ch.audio);
+    try std.testing.expectEqualStrings("BASIC", ch.difficulty_name);
+    try std.testing.expectEqual(@as(usize, 3), ch.notes.len);
+}
+
+test "loadInfoFromDir 端對端：同樣的釋放順序" {
+    const t_io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(t_io, .{ .sub_path = "song.json", .data = test_json });
+
+    var info = try loadInfoFromDir(std.testing.allocator, t_io, tmp.dir);
+    defer info.deinit();
+
+    try std.testing.expectEqualStrings("Example", info.title);
+    try std.testing.expectEqualStrings("audio.wav", info.audio);
+    try std.testing.expectEqual(@as(usize, 1), info.difficulties.len);
+}
+
+test "loadFromDir 在 song.json 不存在時回傳 error" {
+    const t_io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try std.testing.expectError(
+        error.FileNotFound,
+        loadFromDir(std.testing.allocator, t_io, tmp.dir, 0),
+    );
+}
+
+test "parseInfo 拒絕空難度清單、空譜面與不支援版本" {
+    const prefix = "{\"format\":1,\"title\":\"T\",\"artist\":\"A\",\"audio\":\"a.wav\",\"offset_ms\":0,\"bpm\":120,\"difficulties\":";
+    try std.testing.expectError(error.NoSuchDifficulty, parseInfo(std.testing.allocator, prefix ++ "[]}"));
+    try std.testing.expectError(error.EmptyChart, parseInfo(std.testing.allocator, prefix ++ "[{\"name\":\"B\",\"level\":1,\"notes\":[]}]}"));
+    try std.testing.expectError(error.UnsupportedFormat, parseInfo(std.testing.allocator, "{\"format\":2,\"title\":\"T\",\"artist\":\"A\",\"audio\":\"a.wav\",\"offset_ms\":0,\"bpm\":120,\"difficulties\":[]}"));
+}
+
+test "parseInfo 不能跳過第二難度的 note 欄位驗證" {
+    const prefix = "{\"format\":1,\"title\":\"T\",\"artist\":\"A\",\"audio\":\"a.wav\",\"offset_ms\":0,\"bpm\":120,\"difficulties\":[" ++
+        "{\"name\":\"OK\",\"level\":1,\"notes\":[{\"t\":0,\"type\":\"center\"}]}," ++
+        "{\"name\":\"BAD\",\"level\":2,\"notes\":[";
+    const suffix = "]}]}";
+    try std.testing.expectError(error.InvalidWidth, parseInfo(std.testing.allocator, prefix ++
+        "{\"t\":0,\"type\":\"tap\",\"cell\":0,\"width\":0}" ++ suffix));
+    try std.testing.expectError(error.TickSpacingTooSmall, parseInfo(std.testing.allocator, prefix ++
+        "{\"t\":0,\"type\":\"slider\",\"cell\":0,\"width\":4,\"sweep\":8,\"dur\":100,\"combo\":10}" ++ suffix));
+}
+
+test "parseInfo 擁有全部 metadata，不借用輸入 buffer" {
+    const bytes = try std.testing.allocator.dupe(u8, test_json);
+    defer std.testing.allocator.free(bytes);
+    var info = try parseInfo(std.testing.allocator, bytes);
+    defer info.deinit();
+    @memset(bytes, 'x');
+    try std.testing.expectEqualStrings("Example", info.title);
+    try std.testing.expectEqualStrings("Someone", info.artist);
+    try std.testing.expectEqualStrings("audio.wav", info.audio);
+    try std.testing.expectEqualStrings("BASIC", info.difficulties[0].name);
+}
+
+fn parseInfoAllocationCase(gpa: Allocator) !void {
+    var info = try parseInfo(gpa, test_json);
+    defer info.deinit();
+}
+
+test "parseInfo 任意配置失敗皆釋放已取得的 arena" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, parseInfoAllocationCase, .{});
 }

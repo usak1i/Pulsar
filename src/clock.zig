@@ -88,6 +88,11 @@ pub const SongClock = struct {
         self.pending_ms -= step;
     }
 
+    /// 譜面 offset 與玩家 calibration 是不同基準，集中換算避免接線時漏扣或反號。
+    pub fn chartTimeMs(self: *const SongClock, offset_ms: i32) f64 {
+        return self.nowMs() - @as(f64, @floatFromInt(offset_ms));
+    }
+
     pub fn nowMs(self: *const SongClock) f64 {
         return self.out_ms + self.calibration_ms;
     }

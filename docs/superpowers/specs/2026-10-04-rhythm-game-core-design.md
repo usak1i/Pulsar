@@ -1,7 +1,7 @@
 # 音樂遊戲核心設計（spec #1：遊戲本體）
 
 日期：2026-10-04
-狀態：待審閱
+狀態：實作中；2026-10-11 同步已實作契約。Task 1–12 三場景循環已實作；實機验收待完成，Task 13 錄製模式尚未實作。
 範圍：遊戲本體。譜面編輯器為獨立的 spec #2。
 
 ---
@@ -87,30 +87,32 @@ note 畫在判定圈上只是視覺呈現；判定只檢查游標的角度落在
 
 ## 3. 模組切分
 
-依賴方向單向往下，無反向依賴。
+依賴保持單向、無循環。以下箭頭表示「使用／import」，不是資料流：
 
+```text
+scene / main → render、input、recorder、scoring、judge、clock、chart
+scoring      → judge（Judgement 型別）、chart、constants
+judge        → chart、geom、constants
+chart        → geom（Arc 型別）、constants
+clock        → constants
+geom         → constants
+layout       → chart（唯讀 Note）、geom、constants
 ```
-                     scene/        ← select / play / result
-                        │
-      ┌─────────────┬───┴────┬──────────────┐
-      ▼             ▼        ▼              ▼
-   render        judge     input         recorder
-      │             │
-      └──────┬──────┘
-             ▼
-          scoring          clock          chart
-```
+
+`scoring` 消費 `judge.Judgement`，因此依賴方向是 `scoring → judge`；
+`judge` 不呼叫計分器。`chart` 與 `geom` 共用 `Arc`，不另建一套角度型別。
+`render` 不呼叫判定；由場景提供繪圖需要的唯讀資料。
 
 三個刻意的安排：
 
-- **`chart` 不依賴任何東西。** 只負責位元組 ↔ `Chart` 結構。不碰 raylib、音訊、時間。
+- **`chart` 只依賴 std、constants、geom。** 負責位元組 ↔ `Chart` 結構與檔案薄包裝，不碰 raylib、音訊、時間。
   所以格式的每個邊界條件都能用純單元測試覆蓋。
 - **`clock` 不知道 raylib 存在。** 兩個時間來源（錨點、單調時鐘）為注入的函式指標，
   測試可餵假資料驗證平滑行為，不需要音效卡。
 - **`judge` 不知道畫面存在，`render` 不知道判定存在。**
   `judge` 吃 `(now_ms, zone, event)` 吐判定；`render` 吃唯讀狀態快照畫圖。互不呼叫。
 
-### 這三條界線由 build graph 強制，不靠紀律
+### 純核心與 raylib 的界線由 build graph 強制
 
 `build.zig` 已經有兩個模組，而且**只有 exe 連結 raylib**：
 
@@ -118,6 +120,9 @@ note 畫在判定圈上只是視覺呈現；判定只檢查游標的角度落在
 |---|---|---|---|
 | `rhythm_game`（`b.addModule`） | `src/root.zig` | **否** | 純核心 |
 | exe（`b.addExecutable`） | `src/main.zig` | 是 | 視窗、繪圖、場景、輪詢 |
+
+build graph 強制的是純核心不能使用 raylib；核心內部的依賴方向、
+`judge` / `render` 的職責界線仍須由 review 維護。
 
 因此純核心放進 `rhythm_game` 模組即可：**任何人在 `chart.zig` / `clock.zig` /
 `judge.zig` / `scoring.zig` / `geom.zig` 裡實際使用 raylib 會直接編譯失敗**，
@@ -242,10 +247,10 @@ pub const Chart = struct {
 
 ```zig
 /// 純函式：只吃位元組，不碰檔案系統。所有不變量在此驗證。
-pub fn parse(gpa: Allocator, json_bytes: []const u8) ParseError!Chart;
+pub fn parse(gpa: Allocator, json_bytes: []const u8, difficulty: usize) ParseError!Chart;
 
 /// 薄包裝：讀檔後交給 parse。Zig 0.16 的檔案 I/O 走 std.Io。
-pub fn loadFromDir(gpa: Allocator, io: std.Io, dir: std.Io.Dir) LoadError!Chart;
+pub fn loadFromDir(gpa: Allocator, io: std.Io, dir: std.Io.Dir, difficulty: usize) LoadError!Chart;
 ```
 
 `parse` 回傳 error union。以下違反皆為 error，不做 fallback：
@@ -256,7 +261,17 @@ pub fn loadFromDir(gpa: Allocator, io: std.Io, dir: std.Io.Dir) LoadError!Chart;
 4. 每個 `slider.duration_ms > 0`
 5. 每個 `slider.combo_count ≥ 1`
 6. `|time_ms| ≤ max_note_time_ms` 且 `slider.duration_ms ≤ max_slider_duration_ms`
-7. **任兩個 note 的可判定區間不重疊**
+7. **任兩個 note 的可判定區間不重疊**（閉區間，端點相接也算重疊）
+8. `slider.duration_ms / slider.combo_count ≥ min_tick_spacing_ms`（20ms），
+   否則回傳 `TickSpacingTooSmall`
+
+另外，格式版本必須為 1、難度索引必須存在、選定難度不得為空；JSON 中的
+cell 必須在 0..63 才能轉成 `Cell`。缺少必要欄位或未知 note 類型同樣回傳 error。
+`parse` 驗證選定的難度；選歌需要的全難度驗證與資訊摘要由 Task 12 的 parseInfo 提供。
+
+`Chart` 擁有解析所得的字串與 notes，釋放輸入 JSON 後仍有效；由 `deinit` 釋放。
+`duration_ms` 為最後一個判定區間終點加 `chart_tail_padding_ms`。
+`serialize` / `saveToDir` 輸出選定的單一難度，不保留原檔其他難度。
 
 可判定區間的定義：
 
@@ -325,22 +340,33 @@ raylib 的 `GetMusicTimePlayed()`（`zig-pkg/raylib-6.0.0-*/src/raudio.c:2086`�
 
 ```zig
 pub const SongClock = struct {
-    anchor: *const fn () f32,   // 實機 = rl.getMusicTimePlayed
-    mono:   *const fn () f64,   // 實機 = rl.getTime
-    calibration_ms: f32,        // 裝置延遲 / 個人感覺差的校正；第一版固定為 0
-    // 內部狀態：上次錨點值、上次錨點對應的單調時刻、當前修正量
-};
+    anchorFn: *const fn () f64, // 音訊時間，毫秒；實機需將 getMusicTimePlayed 的秒轉為 ms
+    monoFn: *const fn () f64,   // 單調時間，毫秒；實機需將 getTime 的秒轉為 ms
+    calibration_ms: f64 = 0,
+    // 內部狀態略
 
-pub fn nowMs(self: *SongClock) f64;
+    pub fn restart(self: *SongClock) void;
+    pub fn update(self: *SongClock) void;
+    pub fn nowMs(self: *const SongClock) f64;
+    pub fn chartTimeMs(self: *const SongClock, offset_ms: i32) f64;
+};
 ```
+
+每帧呼叫 `update()` 更新，再由 `nowMs()` 讀取時間；`restart()` 讓下一次更新重新對齊錨點。
 
 每帧行為：
 
-1. 以單調時鐘自由前進（`anchor_value + (mono_now - anchor_mono)`）
-2. 錨點跳動時算出誤差，**不直接跳過去**，而是在數十毫秒內線性吃掉
+1. 首次更新對齊錨點；之後以單調時間差 `dt` 推進 `out_ms`
+2. 錨點跳動時算出誤差，**不直接跳過去**，以每帧最多 `clock_max_correction_rate * dt` 的速率修正；收斂時間取決於誤差大小
 3. 誤差超過 `clock_reset_ms`（100ms，代表 seek 或音訊中斷）→ 硬重置，不平滑
 
-對外輸出因此永遠單調、永遠不跳台階。
+在單調來源前進且未硬重置時，平滑修正速率小於 1，輸出保持單調。
+`dt ≤ 0` 時跳過更新；同一局中 `calibration_ms` 保持固定。硬重置可以向後跳，不能承諾跨 seek／中斷永遠單調。
+錨點停住時仍依單調時鐘前進；恢復後若誤差超限，重新對齊錨點。
+
+`judge` 要求同一局的輸入時間單調不減。Task 11 的 play 場景須在餵入判定前
+偵測時間倒退並結束當局或重新初始化，不能沿用已前進的判定狀態。
+時間倒退回傳 `ClockMovedBackwards`，由 main 結束當局並釋放資源，不輸出正常結算。
 
 兩個時間來源皆為注入，故可完全離線測試。
 
@@ -393,7 +419,14 @@ center note 的條件為游標區域 == `.center`。
 每帧掃描：任何 pending 的 note 若 `now > time_ms + good_ms` → 判為 MISS。
 
 因為時間軸依時間遞增且單線程，判定只需維護一個 `[first_active, last_active)`
-滑動窗口，只掃落在判定窗內的少數 note。窗口只往前走，每帧推進為攤提 O(1)。
+滑動窗口，只掃落在判定窗內的少數 note。實作以 `first_active` 搭配時間上界的
+提前退出維持窗口，不另外儲存 `last_active`；窗口只往前走。
+
+呼叫順序固定為 `beginFrame() → update(now, zone, key_held) → 每次按下各呼叫
+keyDown(now, zone) → 消費 judgements()`。判定狀態在初始化時配置一次。
+每帧事件緩衝區固定為 `max_events_per_frame = 64`；超出會累計 `dropped_events`。
+20ms 的 tick 間距下限降低正常幀率下溢出的風險，不能保證長時間掉帧後不溢出。
+呼叫端必須檢查此計數，不能把不完整的事件當成正常成績繼續遊玩；事件溢出回傳 `JudgementOverflow`，本帧不交給計分器，由 main 中止當局。
 
 ### Slider
 
@@ -421,7 +454,11 @@ covered  = 任一觸發鍵處於按下狀態 AND 游標在 ring 且落在
 無論頭判定結果如何。
 
 實作上，每帧處理所有「時刻已經過去但尚未評定」的 tick，以當帧的覆蓋狀態評定。
-在 240 FPS 下取樣誤差 ≤ 4ms，對一個持續按住的動作可以忽略。
+在正常 240 FPS 下，一帧約 4.2ms。覆蓋 tick 只有在頭判定完成、進入 tracking 後
+才會評定；頭部仍 pending 時，即使某個覆蓋 tick 已到時也先等待。
+因此短 tick 間距配上較晚的頭判定，會使用較晚帧的覆蓋狀態，延遲可能超過一帧。
+頭部由 `keyDown` 命中時，已到時的覆蓋 tick 會在下一次 `update` 才評定；
+頭部在 `update` 逾時 MISS 時，則於同次更新開始追蹤。這個順序會影響得分，已有回歸測試。
 
 **沒有尾判。** 放開按鍵或游標離開，只是讓之後的 tick 落空，不產生一次性的時機判定。
 
@@ -476,7 +513,7 @@ raylib 一帧只輪詢一次輸入，所以**幀率直接決定按鍵時刻的�
 ```zig
 pub const Transition = union(enum) {
     stay,
-    to_play: struct { song_dir: []const u8, difficulty: usize },
+    to_play: SongRef, // 固定陣列按值攜帶路徑與難度，不借用 select 記憶體
     to_result: scoring.Summary,
     to_select,
     quit,
@@ -501,14 +538,64 @@ pub const Transition = union(enum) {
   環被離散成 64 格而滑鼠是連續的，玩家需要看到自己在哪一格。
   這不是美化，是此輸入方案可玩的前提。
 
+### Task 10 的繪圖介面
+
+`layout` 負責完整的繪圖幾何：arc 起訖角（跨 63 → 0 時終點角保持遞增）、
+內外半徑、刻度端點、游標形狀及 note 飛行半徑。內半徑夾到 0，避免剛出現的
+note 產生負半徑。閉環測試須涵蓋實際 arc 的中心，不只 `Layout.point`。
+
+`render.drawNote(layout, note, chart_time_ms, tracking_arc)` 接收唯讀資料；
+`tracking_arc` 由場景提供，render／layout 都不呼叫 judge。
+未進入 approach_ms 的 note 不畫；tap／slider 頭部向判定圈移動，
+center 的提示圈從中央區半徑的 0.3 倍長到 1 倍。已判完的 note 由場景移出快照。
+Task 10 完成舞台與游標；Task 11 已接上 note 與歌曲播放。
+
+### Task 11 的遊玩接線
+
+`Play.init(*Play, gpa, io, song_dir, difficulty)` 就地初始化，main 擁有 Play 並呼叫
+`deinit`。Judge 持有 Chart 指標，因此初始化後 Play 不可搬移。初始化失敗逐層
+釋放已取得的資源。一次僅允許一個播放場景使用注入時鐘的音訊來源。
+
+每帧依序：處理 Esc → 更新音訊 → SongClock.update → 換算譜面時間 → 檢查倒退
+→ 輪詢輸入 → judge.update／keyDown → 檢查溢出 → 計分／特效。
+`SongClock.chartTimeMs(offset_ms)` 統一換算 `nowMs() - offset_ms`，供場景與
+離線整合測試共用。clock 仍不依賴 chart 或 raylib。
+
+音訊關閉 looping；自然播畢時保留最後錨點，由單調時鐘繼續推進到譜面尾段，
+避免 raylib 播畢歸零使時間倒退。全部判完且到達 `Chart.duration_ms` 才結算，
+保留既定的尾段時間。視窗關閉與場景轉換都由 main 清理資源。
+
+繪圖從 judge.first_active 開始，到尚未進入 approach_ms 的 note 就停止；
+已判完的 note 不畫。場景將 slider 追蹤 arc 與特效顏色交給 render，render 不讀 judge。
+命中特效以固定 64 格 pool 儲存，滿時只省略視覺特效，不丟計分；
+slider 覆蓋 tick 的特效位置使用該 tick 的 arc。位置、擴散半徑與透明度交給 layout。
+
+Task 12 啟動時進選歌，正常完成轉結算；Esc 在遊玩時回選歌。
+HUD 達成率的分母固定為整張譜面滿分，首個 PERFECT 不會顯示 100%。
+
 ### 選歌場景
 
-掃描 `charts/` 下的子資料夾，列出可選歌曲與難度。
-載入失敗的譜面標示為不可選並顯示原因（見 §9）。
+掃描 `charts/` 下的子資料夾，依目錄名排序，列出可選歌曲與難度。
+`chart.parseInfo` / `loadInfoFromDir` 驗證每個難度，與 `parse` 共用 JSON 解析、
+note 轉換／排序／不變量檢查；回傳擁有字串的 `SongInfo` 與 `DifficultyInfo` 摘要。
+任一難度失敗或沒有難度，整首歌禁用並顯示原因。
+
+exe 選歌層檢查音檔可讀並試載入 music stream，立即卸載且不播放；壞音檔、
+音訊裝置不可用、路徑超長皆禁用。只有 charts/ 不存在視為空清單；其他目錄錯誤
+顯示原因，不能偽裝成空清單。↑↓ 選歌、←→ 選難度、Enter 開始、Esc 離開。
+歌曲與難度清單保持目前項目可見。第一版使用 raylib 預設字型；操作與錯誤標籤
+採 ASCII，譜面後設文字的非拉丁字形支援仍屬顯示限制。
+
+`SongRef.init(path, difficulty)` 複製路徑到固定 `song_path_capacity` 陣列，
+過長回傳 `SongPathTooLong`，絕不截斷。main 的 select／play／result 各有固定位置；
+切換時先釋放來源並設為無活躍資源，再初始化目標，成功後才標成活躍。
+進入遊玩失敗或遊玩中止時返回選歌、顯示原因；不顯示正常結算。
+選歌可重新掃描，因此選歌後檔案被修改仍由 Play.init 的驗證攔下。
 
 ### 結算場景
 
-顯示達成率、各判定級別數量、最大 combo。可重試或退回選歌。
+顯示達成率（兩位小數）、各判定級別數量、最大 combo／全曲滿分。Enter 以按值
+保存的 SongRef 重試同一歌曲與難度；Esc 返回選歌。
 
 ---
 
@@ -520,7 +607,7 @@ pub const Transition = union(enum) {
 - 按下與放開的間隔超過 `hold_threshold_ms = 120` → 記成 slider，
   起始 cell 為按下時的 cell，`sweep` 由放開時的 cell 推出（含正負號）。
 - 依 `bpm` + `offset_ms` 量化到最近的細分格（1/8、1/16 可切換）。
-- 輸出走**正式的 `chart.save()`**。
+- 輸出走**正式的 `chart.saveToDir()`**。
 
 走正式序列化是刻意的：它讓錄製模式順便驗證存檔路徑與 round-trip，
 而編輯器（spec #2）要用的是同一個函式。
@@ -534,8 +621,10 @@ pub const Transition = union(enum) {
 
 統一原則：**壞譜面在選歌畫面就被攔下並顯示原因，絕不帶進遊玩場景才爆。**
 
-- JSON 解析失敗、不變量違反、音檔不存在 → `chart.parse()` / `chart.loadFromDir()` 回傳 error，
-  該歌曲在選歌畫面標為不可選，顯示失敗原因。
+- JSON 解析失敗、不變量違反 → `chart.parse()` 回傳 error；`chart.loadFromDir()`
+  另外回傳讀取 song.json 的檔案錯誤。
+- 音檔存在性與可載入性由 exe 場景層檢查，chart 不負責音訊。上述錯誤均應使
+  歌曲在選歌畫面標為不可選並顯示原因（Task 12）。
 - `charts/` 下找不到任何譜面 → 選歌畫面顯示說明文字，不是崩潰。
 - 音訊載入失敗 → error，不進入 `play` 場景。
 
@@ -570,6 +659,16 @@ pub const Transition = union(enum) {
 - `combo_count = 1` 的 slider → 只有 tick 0，行為等同一個 tap
 
 這組測試是整個專案的安全網，之後調窗口、加 note 種類、重構判定時都還在。
+
+### 目前驗證範圍（2026-10-11）
+
+已通過 128 個測試（純核心 122、exe 6）及 Debug 建置。
+除原有固定 4ms 步長的測試外，Task 11 已加入獨立音訊時間安排輸入、10ms 台階
+錨點與單調時間注入 SongClock、扣除正負 offset_ms、判定再計分的全曲整合測試。
+60／120／240 FPS 全中為 100%、最大 combo 24；全頭部延遲 60ms 加覆蓋全中
+為 21.4/24（約 89.17%）；全程無輸入為 0%。這些測試不需要音效卡。
+Task 12 另有全難度摘要、metadata 所有權、配置失敗清理與 SongRef 複本／長度邊界測試。
+畫面、音訊對拍、操作手感與場景循環均為 PENDING-HUMAN，須在可開窗的機器驗收。
 
 ### 其餘純模組
 
@@ -614,12 +713,36 @@ clock_max_correction_rate = 0.05   // 平滑修正的速率上限（佔 dt 的�
 // 視覺與輸入
 approach_ms      = 700      // note 可見時間（玩家感知的 note 速度）
 default_fps      = 240      // 預設值；可用 --fps=60|120|240 覆寫，見 §6
+stage_tick_cells = 8
+cursor_half_width = 0.06   // 以下厚度皆以 min(w,h)/2 為單位
+tap_half_width = 0.03
+slider_half_width = 0.04
+tracking_half_width = 0.05
+center_note_start_scale = 0.3
+ring_segments = 64
+effect_pool_capacity = 64
+effect_life_ms = 260
+effect_start_radius_px = 8
+effect_growth_px = 46
+effect_start_alpha = 220
 
 // 計分權重
 w_perfect        = 1.0
 w_great          = 0.8
 w_good           = 0.5
 w_miss           = 0.0
+
+// 譜面與判定
+chart_tail_padding_ms = 2000
+max_note_time_ms = 3600000  // |time_ms| 上限，一小時
+max_slider_duration_ms = 60000
+min_tick_spacing_ms = 20   // duration_ms / combo_count 下限
+max_events_per_frame = 64  // 超出累計 dropped_events，呼叫端必須處理
+
+// 選歌
+song_path_capacity = 256
+select_visible_songs = 10
+select_visible_difficulties = 4
 
 // 錄製模式
 hold_threshold_ms = 120     // 超過此按住時間則記成 slider

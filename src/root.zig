@@ -9,6 +9,7 @@
 //! 每個純模組都要在這裡匯出一行，`zig build test` 才會跑到它的測試。
 
 pub const constants = @import("constants.zig");
+pub const layout = @import("layout.zig");
 pub const geom = @import("geom.zig");
 pub const chart = @import("chart.zig");
 pub const clock = @import("clock.zig");
@@ -16,8 +17,10 @@ pub const judge = @import("judge.zig");
 pub const scoring = @import("scoring.zig");
 
 test {
+    _ = @import("integration_test.zig");
     _ = constants;
     _ = geom;
+    _ = layout;
     _ = chart;
     _ = clock;
     _ = judge;

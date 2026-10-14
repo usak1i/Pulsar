@@ -24,34 +24,37 @@ zig build -Doptimize=ReleaseFast
 
 單向往下，**沒有任何反向依賴**。新增程式碼不得破壞這個方向。
 
+```text
+scene / main → render、input、recorder、scoring、judge、clock、chart
+scoring      → judge（Judgement 型別）、chart、constants
+judge        → chart、geom、constants
+chart        → geom（Arc 型別）、constants
+clock        → constants
+geom         → constants
+layout       → chart（唯讀 Note）、geom、constants
 ```
-                     scene/        ← select / play / result
-                        │
-      ┌─────────────┬───┴────┬──────────────┐
-      ▼             ▼        ▼              ▼
-   render        judge     input         recorder
-      │             │
-      └──────┬──────┘
-             ▼
-          scoring          clock          chart
-```
+
+箭頭表示使用／import，不是資料流。`judge` 不依賴 `scoring`；
+場景把判定結果交給計分器。
 
 三條必須守住的界線：
 
-- **`chart` 不 import 任何東西**（除 std）。只做位元組 ↔ `Chart` 結構。
-  檔案 I/O 在 `loadFromDir`，驗證邏輯在純函式 `parse`。
+- **`chart` 只依賴 std、constants、geom**。負責位元組 ↔ `Chart` 結構。
+  檔案 I/O 在 `loadFromDir` / `saveToDir`，驗證邏輯在純函式 `parse`。
 - **`clock` 不 import raylib。** 兩個時間來源是注入的函式指標，
   所以測試不需要音效卡。不要為了方便直接呼叫 `rl.getTime()`。
 - **`judge` 不碰繪圖，`render` 不碰判定。** `judge` 吃 `(now_ms, zone, event)`
   吐判定結果；`render` 吃唯讀狀態快照。兩者不互相呼叫。
 
-### 界線由 build graph 強制
+### 純核心／raylib 界線由 build graph 強制
+
+核心內部的依賴方向及 judge／render 的職責界線仍由 review 維護。
 
 `build.zig` 有兩個模組，**只有 exe 連結 raylib**：
 
 | 模組 | root | raylib | 內容 |
 |---|---|---|---|
-| `rhythm_game` | `src/root.zig` | 否 | `constants` `geom` `chart` `clock` `judge` `scoring` |
+| `rhythm_game` | `src/root.zig` | 否 | `constants` `geom` `layout` `chart` `clock` `judge` `scoring` |
 | exe | `src/main.zig` | 是 | `input` `render` `recorder` `scene/` |
 
 在純核心那一側**實際使用** raylib 會直接編譯失敗：
@@ -79,7 +82,7 @@ zig build -Doptimize=ReleaseFast
 
 ## 譜面不變量
 
-`chart.load()` 驗證，違反一律回傳 error，**不做 fallback、不做修補**。
+`chart.parse()` 驗證（`loadFromDir()` 讀檔後呼叫它），違反一律回傳 error，**不做 fallback、不做修補**。
 最重要的一條：**任兩個 note 的可判定區間不重疊**——單一游標無法同時在兩個角度，
 譜面必須是單線程的。完整清單見 spec §4。
 
@@ -102,7 +105,7 @@ zig build -Doptimize=ReleaseFast
 是 `zig build test` 與 `zig build`；需要看到畫面的事情必須標成 PENDING-HUMAN
 交給人在有顯示器的機器上確認。
 
-這也是 `src/layout.zig` 存在的理由：繪圖裡唯一會算錯、而且錯了只能靠眼睛
+這也是 `src/layout.zig` 的理由（Task 10 已實作）：繪圖裡唯一會算錯、而且錯了只能靠眼睛
 發現的部分就是座標數學。把它放在不連結 raylib 的那一側，就能用一條閉環測試
 釘住——把每一格的中心角度算成螢幕座標、再餵回 `geom.zoneAt`，必須回到同一格。
 `render.zig` 因此只剩 `rl.draw*` 呼叫。**不要在 render 裡重算角度或半徑**，
@@ -127,8 +130,9 @@ zig build -Doptimize=ReleaseFast
 ## 測試
 
 - **最高價值的測試**：腳本化輸入 + 注入時鐘 → 不開視窗打完整首歌，
-  斷言達成率與 combo。改判定邏輯時這組測試是安全網。
-- 全測：`chart`（含每條不變量的違反案例）、`clock`、`input.zoneAt`、`scoring`、`judge`
+  斷言達成率與 combo。已有固定步長版本，以及 Task 11 的 SongClock + 正負
+  offset_ms 全曲整合測試（三種幀率、部分得分、全 MISS）。改判定邏輯時是安全網。
+- 全測：`chart`（含每條不變量的違反案例）、`clock`、`geom.zoneAt`、`scoring`、`judge`
 - 不寫自動測試：`render`、場景接線、raylib 呼叫 — 靠實際跑起來看
 
 ## 風格

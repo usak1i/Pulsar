@@ -34,6 +34,18 @@ pub const clock_max_correction_rate: f64 = 0.05;
 // === 視覺與輸入 ===
 pub const approach_ms: f64 = 700;
 pub const default_fps: i32 = 240;
+pub const stage_tick_cells: u32 = 8;
+pub const cursor_half_width: f32 = 0.06;
+pub const tap_half_width: f32 = 0.03;
+pub const slider_half_width: f32 = 0.04;
+pub const tracking_half_width: f32 = 0.05;
+pub const center_note_start_scale: f32 = 0.3;
+pub const ring_segments: i32 = 64;
+pub const effect_pool_capacity: usize = 64;
+pub const effect_life_ms: f64 = 260;
+pub const effect_start_radius_px: f32 = 8;
+pub const effect_growth_px: f32 = 46;
+pub const effect_start_alpha: f32 = 220;
 
 // === 計分權重 ===
 pub const w_perfect: f64 = 1.0;
@@ -65,6 +77,11 @@ pub const min_tick_spacing_ms: f64 = 20;
 /// 正常譜面在正常帧率下到不了這個數字；超出時 judge 會計入
 /// dropped_events 而不是靜默吞掉。
 pub const max_events_per_frame: usize = 64;
+
+// === 選歌 ===
+pub const song_path_capacity: usize = 256;
+pub const select_visible_songs: usize = 10;
+pub const select_visible_difficulties: usize = 4;
 
 // === 錄製模式 ===
 pub const hold_threshold_ms: f64 = 120;
