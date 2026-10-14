@@ -3459,6 +3459,240 @@ judge，已由下列實作取代；後續請使用原始碼的介面，勿恢復
 自動測試涵蓋純解析、所有權與核心遊玩鏈，不涵蓋 raylib／場景接線。未宣稱
 上述人工作業已完成。Task 13 的錄製模式仍待實作。
 
+### Task 12.5: 審查修正 — 先讓它不會卡死，再讓它說實話
+
+2026-10-11 的審查（純核心與 exe 側各一位 opus reviewer）找到的問題。這個 task
+全是外科手術式的小修正，彼此獨立，不需要任何重構就能做。
+
+**Files:**
+- Modify: `src/main.zig`（F1、F4a）
+- Modify: `src/chart.zig`（F3）
+- Modify: `src/scene/play.zig`（F4b）
+- Modify: `src/render.zig`（F4c）
+- Modify: `docs/superpowers/specs/2026-10-04-rhythm-game-core-design.md`（F5）
+
+- [ ] **Step 1: F1（Critical）— 失敗路徑不得跳過繪圖**
+
+`src/main.zig` 的 `.to_play` 分支在 `play.init` 失敗時用 `continue` 回到迴圈頂端，
+因而跳過 `rl.beginDrawing()` / `rl.endDrawing()`。
+
+**為什麼這會卡死**（已查證 raylib 原始碼）：`PollInputEvents()` 只在 `EndDrawing()`
+裡被呼叫（`rcore.c:927`，整個函式庫唯一的呼叫點），而它正是輪替
+`previousKeyState` / `currentKeyState` 的地方；`IsKeyPressed` 比較的就是這兩者
+（`rcore.c:3812`）。跳過那一圈 ⇒ 按鍵邊緣狀態不輪替、`windowShouldClose` 不刷新。
+
+連鎖後果：選歌按 Enter → `play.init` 失敗 → `continue` → 下一圈
+`isKeyPressed(.enter)` **仍為 true** → 剛重建的 select（游標已重置為 0）立刻
+再次啟動第 0 首 → 若它也失敗，就是無限迴圈：不出任何畫面、`windowShouldClose`
+永不刷新，連關視窗都關不掉。
+
+修法：把 `continue` 拿掉，讓失敗路徑自然落到迴圈尾端的繪圖區段。
+
+```zig
+.to_play => |ref| {
+    leaveScene(&active, &select, &play);
+    current_song = ref;
+    if (play.init(init.gpa, init.io, current_song.path(), current_song.difficulty)) {
+        active = .play;
+    } else |err| {
+        // 不要 continue：跳過 endDrawing 會讓 raylib 不輪詢輸入，
+        // Enter 的邊緣狀態殘留下來，下一圈會自己再啟動一次。
+        try select.init(init.gpa, init.io);
+        active = .select;
+        select.notice = @errorName(err);
+    }
+},
+```
+
+- [ ] **Step 2: F3（Important）— 補上 time_ms 負側界限的測試**
+
+`src/chart.zig` 的 `convertNote` 已經正確地做了雙邊檢查
+（`rn.t > max or rn.t < -max`），但沒有任何測試走到負側：全 repo 的 `t` 字面值
+只有 `-1000 … 2147483647`，唯一的負數是 `-1000`，`-2147483648` 不存在。
+
+所以把那行寫成單邊（`rn.t > max`，最自然的寫法）會通過全部 128 個測試，而
+`t = minInt(i32)` 會在 `checkNoOverlap` 的 `time_ms - 120` 下溢時 panic，
+`judge.update` 對每個 active note 無條件呼叫 `judgeStartMs()` 也會 panic。
+spec §4 明說溢位必須是 error 不是 panic，所以這條界限是承重的。
+
+在 `"不變量: time_ms 超出上界"` 那個測試旁邊加：
+
+```zig
+test "不變量: time_ms 超出下界" {
+    // 這條界限原本有強制但無測試——寫成單邊檢查會通過全部測試，
+    // 而 minInt 會在 checkNoOverlap 的 time_ms - good_ms 下溢時 panic。
+    const j = jsonWithNotes("{\"t\":-2147483648,\"type\":\"center\"}");
+    try std.testing.expectError(error.TimeOutOfRange, parse(std.testing.allocator, j, 0));
+}
+```
+
+- [ ] **Step 3: F4a — `resolveFps` 不該在第一個匹配就回傳**
+
+`--fps=60 --fps=99` 目前會靜默接受 60。spec §6 說非清單上的值一律拒絕，
+而「後面那個是錯的就當沒看到」不是拒絕。改成掃完全部參數：任何一個
+`.invalid` 就回傳 error，最後一個 `.fps` 勝出。
+
+同時補測試（`resolveFps` 目前完全沒有測試，只有 `parseFpsArg` 有）。
+它吃 `std.process.Args` 不好在測試裡構造，所以把實際邏輯抽成吃
+`[]const []const u8` 的純函式，`resolveFps` 只負責把 args 迭代成切片再轉交。
+測試：無參數 → 240、`--help --fps=120` → 120、`--fps=99` → error、
+**`--fps=60 --fps=99` → error**。
+
+- [ ] **Step 4: F4b — `active_music orelse unreachable` 改成有定義的行為**
+
+`src/scene/play.zig` 的 `anchorMs` 用 `orelse unreachable`。今天到不了
+（main 的場景標記紀律加上 `PlayAlreadyActive` 守衛），但那是 ReleaseFast 下的
+UB，而唯一擋著它的是一個檔案層級的可變狀態。改成 `orelse return last_audio_ms`
+——零成本，而且語意正確：沒有音樂時就維持上一個已知位置。
+
+- [ ] **Step 5: F4c — 格式化緩衝區的 `catch unreachable`**
+
+`src/render.zig` 的三處 `bufPrintZ` 共用同一個 160 byte 緩衝區，各自在下一次
+覆寫前就畫出去，所以目前是正確的——但只要有人調換兩個敘述的順序就會畫出亂碼。
+`catch unreachable` 在 ReleaseFast 也是 UB。
+
+改法：各自用獨立的區域緩衝區，並把 `catch unreachable` 換成 `catch "…"`
+之類的安全退路。`drawResult` 的四個 u32 是最緊的一個，確認緩衝區夠大。
+
+- [ ] **Step 6: F5 — 修掉 spec §7 的過期描述**
+
+spec §7 仍寫 `render` 是 `fn draw(state: *const PlayState) void`。實際上沒有
+`PlayState`，`render` 是一組 per-primitive 函式（`drawStage` / `drawArc` /
+`drawCursor` / `drawNote` / `drawEffects` / `drawHud` …），由場景逐一呼叫並
+傳入唯讀資料。旁邊的 Task 10 註記已經更新，這一行漏了。改成描述實際形狀。
+
+- [ ] **Step 7: 驗證與 commit**
+
+Run: `zig build test` → 全綠，且測試數比 128 多（新增 F3 與 F4a 的測試）
+Run: `zig build` → 乾淨
+
+F1 無法在此環境驗證（開不了視窗），在 report 裡標為 PENDING-HUMAN，並寫明
+人要確認的具體情境：**故意讓一首歌載入失敗，確認選歌畫面顯示錯誤原因後停住，
+而不是自己又啟動一次。**
+
+---
+
+### Task 12.6: Play 的時間來源注入 — 讓兩個中止守衛變成可測
+
+審查指出的最有價值的一條：`Play.update` 裡有兩個中止守衛
+（`ClockMovedBackwards` 與 `JudgementOverflow`），它們保護的是「不要讓玩家
+打一段不算分的歌」，但**它們從未被執行過**——這個環境開不了視窗，而
+`update` 全程直接呼叫 raylib。
+
+`SongClock` 已經示範了正確做法：時間來源是注入的函式指標，所以它的 11 個測試
+不需要音效卡。`Play` 應該比照。
+
+**Files:**
+- Modify: `src/scene/play.zig`（注入、拆分 update、修 F2）
+- Modify: `src/input.zig`（`Frame` 帶上場景需要的按鍵）
+- Modify: `src/judge.zig`（兩個 accessor）
+- Modify: `src/main.zig`（配合新的 update 形狀）
+
+- [ ] **Step 1: 把 raylib 從 update 的決策路徑上移開**
+
+把 `Play.update` 拆成兩層：
+
+```zig
+/// 不碰 raylib 的那一半。所有輸入都是參數，所以可以無視窗測試。
+pub fn step(self: *Play, now_ms: f64, frame: input.Frame) StepError!transition.Transition
+
+/// raylib 的那一半：抽音訊、讀時鐘、輪詢輸入，然後交給 step。
+pub fn update(self: *Play) StepError!transition.Transition {
+    rl.updateMusicStream(self.music);
+    self.clock.update();
+    return self.step(self.clock.chartTimeMs(self.chart.offset_ms), input.poll());
+}
+```
+
+要讓 `step` 真的不碰 raylib，有三個東西得搬走：
+
+1. **Escape**：目前 `step` 的位置會呼叫 `rl.isKeyPressed(.escape)`。改成讓
+   `input.Frame` 多一個 `escape_pressed: bool`，由 `input.poll()` 填。
+2. **`render.currentLayout()`**：目前只用來算特效的座標。改成讓 `EffectPool`
+   存 `?geom.Arc` 而不是已經算好的 `Point`，在 `draw` 時才解析成座標。
+   這樣 `step` 完全不需要 Layout——而且這本來就比較對：特效的位置應該在畫的
+   時候決定，視窗縮放時才會跟著變。
+3. **時間來源**：`anchorFn` / `monoFn` 目前是檔案層級函式，直接讀 raylib。
+   改成 `Play.init` 的參數，預設是現在那兩個；測試傳自己的。
+
+- [ ] **Step 2: F2（Important）— `draw` 不要自己重算 slider 的 tick**
+
+`src/scene/play.zig` 的 `draw` 以 `progress * combo_count` 從牆鐘時間推算
+目前的 tick，而不是讀 judge 的狀態。那是 `judge.tickTimeMs` 反函數的**第二份
+獨立實作**，住在 raylib 側、在所有測試之外。
+
+它什麼時候會錯：judge 在頭判定仍 `pending` 時會**延後**覆蓋 tick 的評定，
+而這份繪圖計算不會——所以頭判定按得晚、或某一帧特別長的時候，
+**畫給玩家看的追蹤目標不等於實際正在計分的 arc**。
+
+改成讀 judge 的真實狀態。這需要 judge 提供兩個 accessor（見 Step 3），
+用 `next_tick - 1`（已評定的最後一個 tick）而不是從時間重推。
+
+- [ ] **Step 3: judge 加兩個 accessor，停止讓場景伸進它的內部**
+
+`play.draw` 目前直接讀 `self.judge.first_active` 與
+`self.judge.states[i].status`。問題不在「私有」（Zig 沒有私有欄位），而在於
+它把 judge 的窗口表示硬編進了另一個模組的繪圖迴圈——spec 允許 judge 改掉
+`first_active` 或 `status` 的表示，而那會在沒有任何編譯期訊號的情況下
+弄壞另一個檔案。
+
+在 `src/judge.zig` 加：
+
+```zig
+/// 尚未判定完成的最早一個 note 的索引。場景用它決定從哪裡開始掃描繪圖。
+pub fn firstActive(self: *const Judge) usize
+
+/// 這個 note 是否已經判定完畢（含 MISS）。
+pub fn isDone(self: *const Judge, note_index: usize) bool
+
+/// slider 已經評定過的最後一個 tick；尚未進入追蹤時回傳 null。
+/// 場景用它畫出「現在應該追蹤到哪裡」，避免從時間重推而與判定不一致。
+pub fn currentTick(self: *const Judge, note_index: usize) ?u32
+```
+
+- [ ] **Step 4: 寫兩個中止守衛的測試——這是整個 task 的目的**
+
+```zig
+test "時間倒退時回傳 ClockMovedBackwards，且計分器可證明未被觸及" {
+    // 「偵測發生在判定之前」這件事，唯一的證明方式就是斷言計分器沒有動過。
+    // 只斷言回傳了 error 不夠——賦值寫在檢查之前也會回傳 error，但那時
+    // 判定已經跑過了。
+    ...
+    // 正常跑幾帧，累積一些分數並記下來
+    // 然後讓注入的錨點向後跳超過 clock_reset_ms
+    try std.testing.expectError(error.ClockMovedBackwards, play.step(earlier_now, frame));
+    // 分數與 combo 必須和倒退之前完全相同
+    try std.testing.expectEqual(before, play.scorer.summary());
+}
+
+test "判定溢出時回傳 JudgementOverflow，該帧的判定不進計分器" {
+    // 強迫 dropped_events 非零（例如用一張 tick 間距在下限、再製造一次
+    // 跨越大量 tick 的長帧），斷言回傳 error 且該帧的判定沒有任何一個
+    // 被 apply 進計分器。
+}
+```
+
+這兩個測試不需要視窗、不需要音效卡，因為 `step` 的輸入全是參數。
+
+- [ ] **Step 5: 順便補上 F2 的回歸測試**
+
+```zig
+test "draw 用的 tick 與 judge 判定的 tick 一致" {
+    // 在頭判定仍 pending、以及單帧跨越多個 tick 的情況下，
+    // 兩者都必須相同。這正是舊的時間重推版本會分歧的兩種情況。
+}
+```
+
+- [ ] **Step 6: 驗證與 commit**
+
+Run: `zig build test` → 全綠，測試數增加
+Run: `zig build` → 乾淨
+
+PENDING-HUMAN 不變（畫面、音訊、手感仍需實機）。但「中止守衛會不會誤觸發、
+誤觸發時會不會把分數算進去」從此不再是 PENDING-HUMAN——那是這個 task 的回報。
+
+---
+
 ### Task 13: recorder — 錄製模式
 
 邊播歌邊記錄按鍵，量化到拍點，用**正式的 `chart.serialize`** 寫出來。
